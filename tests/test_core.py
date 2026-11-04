@@ -533,6 +533,54 @@ class TestDailyClose(Base):
         self.assertEqual(r["reviewed"], [])
 
 
+class TestDailyClose(Base):
+    def test_daily_flow(self):
+        from core import daily, committee, llm
+        cands = [{"rank": i + 1, "symbol": s, "name": n, "score": 9 - i, "price": 10, "pct": 1, "reasons": []}
+                 for i, (s, n) in enumerate([("sz000001", "平安"), ("sh600036", "招行"), ("sh600900", "长电"),
+                                             ("sz000333", "美的")])]
+        old = (screener.run, committee.run_builtin, llm.enabled)
+        reviewed = []
+
+        def fake_run(sym, acct, intent, trigger=""):
+            reviewed.append(sym)
+            ok = sym == "sz000001"
+            rid = db.run("INSERT INTO committee_runs(ts,symbol,status,finished_at,final) VALUES(?,?,?,?,?)",
+                         (time.time(), sym, "approved" if ok else "rejected", time.time(), "{}"))
+            return {"run_id": rid, "status": "approved" if ok else "rejected", "decision": "buy" if ok else "pass",
+                    "summary": "测试", "entry_max": 10.2, "stop_loss": 9.4, "target": 11.5,
+                    "gate_notes": [] if ok else ["风控官否决：测试"]}
+        screener.run = lambda **k: {"screen_id": 1, "candidates": cands, "regime": {"state": "震荡", "position_cap": 0.5}}
+        committee.run_builtin = fake_run
+        llm.enabled = lambda: True
+        try:
+            PRICES["sh600900"] = fake_quote("600900", 10.0)
+            broker.paper_execute("600900", "buy", 100)          # 已持有的跳过
+            r = daily.run_daily_close(force=True)
+        finally:
+            screener.run, committee.run_builtin, llm.enabled = old
+        self.assertEqual(reviewed, ["sz000001", "sh600036", "sz000333"])   # 前3只（跳过持仓的长电）
+        self.assertEqual([a["symbol"] for a in r["approved"]], ["sz000001"])
+        w = db.one("SELECT note FROM watchlist WHERE symbol='sz000001'")
+        self.assertIn("委员会", w["note"])
+        self.assertIn("入场≤10.2", w["note"])
+        self.assertTrue(any("收盘总结" in t or "通过" in c for t, c in [(x[0], x[1]) for x in SENT]))
+
+    def test_icepoint_skips_committee(self):
+        from core import daily, committee, llm
+        old = (screener.run, committee.run_builtin, llm.enabled)
+        screener.run = lambda **k: {"screen_id": 1, "candidates": [{"rank": 1, "symbol": "sz000001", "name": "x",
+                                                                      "score": 9, "price": 1, "pct": 0, "reasons": []}],
+                                    "regime": {"state": "冰点", "position_cap": 0.0}}
+        committee.run_builtin = lambda *a, **k: self.fail("冰点不应开委员会")
+        llm.enabled = lambda: True
+        try:
+            r = daily.run_daily_close(force=True)
+        finally:
+            screener.run, committee.run_builtin, llm.enabled = old
+        self.assertEqual(r["reviewed"], [])
+
+
 class TestKlineFallback(Base):
     def test_fallback_and_breaker(self):
         calls = []
@@ -772,6 +820,26 @@ class TestCommitteeAndPlans(Base):
         run = committee.get_run(res["run_id"])
         self.assertEqual(len(run["opinions"]), 13)
         self.assertEqual([o["round"] for o in run["opinions"] if o["role"] == "bear"], [1, 2])
+
+    def test_autopilot_timeline_and_status(self):
+        """AI 动态按账户区分；查询不改变账户授权。"""
+        from core import autopilot
+        PRICES["sz000001"] = fake_quote("000001", 10.0)
+        config.save_config({"committee": {"required_for_buy": False}})
+        agent.apply_decision({"market_view": "测试巡检", "actions": [
+            {"symbol": "000001", "action": "buy", "position_pct": 0.2, "confidence": 0.8, "reason": "测试买"}]},
+            agent="test", trigger="测试")
+        ev = autopilot.timeline("paper")
+        kinds = {e["kind"] for e in ev}
+        self.assertIn("trade", kinds)
+        self.assertIn("decision", kinds)
+        self.assertTrue(all("time" in e for e in ev))
+        self.assertFalse([e for e in autopilot.timeline("live") if e["kind"] == "trade"])
+        st = autopilot.status()
+        self.assertEqual(len(st["steps"]), 4)
+        self.assertEqual(st["today"]["trades_paper"], 1)
+        self.assertEqual(st["ai_accounts"], ["paper"])
+        self.assertEqual(config.load_config()["ai"]["accounts"], ["paper"])
 
     def test_run_async_returns_immediately_with_progress(self):
         """送委员会：立刻拿到会议号（不等档案/大模型），重复点击不重开，进行中能看到进度。"""

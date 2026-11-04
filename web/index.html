@@ -26,6 +26,21 @@ header{position:sticky;top:0;z-index:10;background:#0b0f14ee;backdrop-filter:blu
 nav{display:flex;gap:2px;margin-left:auto;flex-wrap:wrap}
 nav a{color:var(--mute);text-decoration:none;padding:6px 11px;border-radius:6px}
 nav a.act,nav a:hover{color:var(--text);background:var(--panel2)}
+nav .sep{width:1px;background:var(--line);margin:4px 6px}
+nav a.tool{font-size:13px}
+.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}
+.steps>div{background:var(--panel2);border-radius:8px;padding:8px 10px;border-left:3px solid var(--line)}
+.steps>div.run{border-left-color:var(--down)}.steps>div.done{border-left-color:var(--blue)}.steps>div.wait{border-left-color:var(--warn)}
+.steps small{display:block;color:var(--mute);font-size:11px}
+@media(max-width:900px){.steps{grid-template-columns:1fr 1fr}}
+.tl>div{display:grid;grid-template-columns:56px 24px 1fr;gap:6px;padding:9px 0;border-bottom:1px dashed var(--line)}
+.tl .t{color:var(--mute);font:12px var(--mono);padding-top:2px}
+.tl .d{color:var(--mute);font-size:12px;margin-top:3px;white-space:pre-wrap}
+.tlday{margin:16px 0 4px;font-weight:600;color:var(--accent)}
+.switch{display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:13px}
+.switch i{width:34px;height:18px;border-radius:9px;background:var(--line);position:relative;transition:.2s}
+.switch i:after{content:'';position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:50%;background:#fff;transition:.2s}
+.switch.on i{background:var(--down)}.switch.on i:after{left:18px}
 main{padding:16px 18px;max-width:1500px;margin:0 auto}
 .grid{display:grid;gap:14px}
 .g2{grid-template-columns:1fr 1fr}.g3{grid-template-columns:repeat(3,1fr)}.g4{grid-template-columns:repeat(4,1fr)}
@@ -95,11 +110,7 @@ body.live #acctBar{background:#ff9f4318;color:var(--warn)}
   <span class="pill" id="aiacc">AI: --</span>
   <span class="pill warn hidden" id="pend" onclick="go('orders')">待确认 0</span>
   <span class="seg" id="acctSw"><button data-a="paper">🧪 模拟盘</button><button data-a="live">💰 实盘</button></span>
-  <nav id="nav">
-    <a href="#dash">总览</a><a href="#watch">行情</a><a href="#screen">选股</a><a href="#committee">委员会</a><a href="#rules">规则预警</a><a href="#strategies">策略</a><a href="#backtest">回测</a>
-    <a href="#ai">AI决策</a><a href="#orders">订单交易</a><a href="#settings">设置</a>
-    <a href="javascript:logout()" title="退出登录">退出</a>
-  </nav>
+  <nav id="nav"></nav>
 </header>
 <div id="acctBar"></div>
 <main id="app"></main>
@@ -132,9 +143,19 @@ const ACCT_NAME={paper:'模拟盘',live:'实盘'};
 function applyAcct(){
   document.body.classList.toggle('live',ACCT==='live');
   document.querySelectorAll('#acctSw button').forEach(b=>b.classList.toggle('act',b.dataset.a===ACCT));
-  $('#acctBar').innerHTML=ACCT==='paper'
-    ?'🧪 当前查看：<b>模拟盘</b>（虚拟资金，AI 自动成交，亏了不花钱）'
-    :'💰 当前查看：<b>实盘</b>（真实资金）· AI 只能生成待确认订单，必须你确认后在券商 App 下单';
+  // 每个账户一套自己的菜单；分隔线右边是两个账户共用的工具
+  const main=ACCT==='paper'
+    ?[['dash','总览'],['feed','AI 动态'],['screen','选股'],['committee','委员会'],['orders','成交记录']]
+    :[['dash','总览'],['orders','待确认订单'],['feed','AI 建议记录'],['screen','选股'],['committee','委员会']];
+  const tools=[['watch','行情'],['rules','规则预警'],['strategies','策略'],['backtest','回测'],['ai','AI决策'],['settings','设置']];
+  $('#nav').innerHTML=main.map(([h,t])=>`<a href="#${h}">${t}</a>`).join('')+'<span class="sep"></span>'+
+    tools.map(([h,t])=>`<a class="tool" href="#${h}">${t}</a>`).join('')+'<a class="tool" href="javascript:logout()" title="退出登录">退出</a>';
+  document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('act',a.getAttribute('href')=='#'+page));
+  const shared=['screen','committee','ai','watch','rules','strategies','backtest'].includes(page);
+  $('#acctBar').innerHTML=(ACCT==='paper'
+    ?'🧪 <b>模拟盘 · AI 全自动</b>：选股 → 委员会 → 买卖 → 止损，全部 AI 自己做，你只看结果（虚拟资金，亏了不花钱）'
+    :'💰 <b>实盘 · 你做主</b>：AI 只出建议单，你在「待确认订单」里点确认，再去券商 App 下单（真实资金）')
+    +(shared?'<br><small class="mute">这个页面是两个账户共用的「AI 大脑」：同一批选股和委员会结论，模拟盘自动执行，实盘变成建议单等你确认</small>':'');
 }
 function setAcct(a){ACCT=a;try{localStorage.setItem('acct',a)}catch(e){}applyAcct();route()}
 function go(p){location.hash=p}
@@ -156,7 +177,8 @@ async function status(){
 
 // ---------- 总览 ----------
 async function pageDash(first){
-  const [ov,alerts,decs,pl]=await Promise.all([api('/api/overview'),api('/api/alerts?limit=12'),api('/api/decisions?limit=1'),api('/api/plans').catch(()=>({active:[]}))]);
+  const [ov,alerts,decs,pl,ap,tl]=await Promise.all([api('/api/overview'),api('/api/alerts?limit=12'),api('/api/decisions?limit=1'),api('/api/plans').catch(()=>({active:[]})),
+    api('/api/autopilot').catch(()=>null),api('/api/timeline?account='+ACCT+'&days=2').catch(()=>[])]);
   const s=ov.accounts[ACCT], other=ov.accounts[ACCT==='paper'?'live':'paper'];
   const acc=`<div class="card"><h3>${ACCT_NAME[ACCT]}${ACCT=='paper'?' <span class="tag">虚拟资金</span>':' <span class="tag wait">真实资金·需你确认</span>'}
       <a class="r mute" href="javascript:setAcct('${ACCT==='paper'?'live':'paper'}')">切换到${ACCT_NAME[ACCT==='paper'?'live':'paper']}（${money(other.equity)}）→</a></h3>
@@ -167,13 +189,14 @@ async function pageDash(first){
       <div><small>可用资金</small><span class="num">${money(s.cash)}</span></div>
       <div><small>持仓市值 / 今日成交</small><span class="num">${money(s.market_value)} / ${s.today_trades}笔</span></div>
     </div>
-    ${ACCT==='live'?`<div class="mute" style="margin-top:8px"><small>实盘资金/持仓需要和券商保持一致：在「订单交易」确认 AI 的建议单并回填成交价，或在「设置 → 实盘账户」手动校准。AI 实盘权限：${(window._st&&window._st.ai_accounts||[]).includes('live')?'<b class="up">已开启</b>':'未开启（只操作模拟盘）'}</small></div>`:''}</div>`;
+    ${ACCT==='live'?`<div class="mute" style="margin-top:8px"><small>实盘资金/持仓需要和券商保持一致：在「待确认订单」确认 AI 的建议单并回填成交价，或在「设置 → 实盘账户」手动校准。AI 实盘权限：${(window._st&&window._st.ai_accounts||[]).includes('live')?'<b class="up">已开启</b>':'未开启（只操作模拟盘）'}</small></div>`:''}</div>`;
   const pos=s.positions.map(p=>({...p,acct:ACCT}));
   const plans=pl.active.filter(p=>p.account===ACCT);
   const d=decs[0];
   $('#app').innerHTML=`
   <div class="card" style="margin-bottom:14px"><div class="idx">${ov.indexes.map(i=>`<div><span class="mute">${i.name}</span> <b class="num ${pc(i.pct)}">${f2(i.price)}</b> <span class="num ${pc(i.pct)}">${sg(i.pct)}%</span></div>`).join('')}</div>
    <div class="idx" id="glob" style="margin-top:8px;font-size:12px"><span class="mute">外盘加载中…</span></div></div>
+  ${ap?pilotCard(ap,tl):''}
   ${acc}
   <div class="grid g21" style="margin-top:14px">
     <div class="card"><h3>${ACCT_NAME[ACCT]}净值曲线</h3><div id="eq" class="chart"></div></div>
@@ -203,6 +226,42 @@ async function pageDash(first){
   api('/api/flash?n=20').then(fl=>{const e=$('#flash');if(e)e.innerHTML=fl.map(x=>`<div><span class="mute num">${esc(x.time)}</span> ${esc(x.text)}</div>`).join('')||'<div class="mute">暂无快讯</div>'}).catch(()=>{const e=$('#flash');if(e)e.innerHTML='<div class="mute">快讯获取失败（网络或数据源暂不可用）</div>'});
   drawEq(ACCT);
 }
+// ---------- AI 自动驾驶卡片（总览顶部） ----------
+const STEP_ST={run:'运行中',done:'今天已完成',wait:'等待时间到',off:'今天不运行'};
+function pilotCard(ap,tl){
+  const on=ap.ai_accounts.includes(ACCT), t=ap.today;
+  const sw=`<span class="tag ${on?'ok':'wait'} r">${ACCT==='paper'?'AI 自动交易':'AI 出实盘建议'}：${on?'开启':'关闭'}</span>`;
+  const warn=!ap.llm_enabled?'<div class="up" style="margin-top:8px">⚠ 内置大模型未启用，AI 巡检和委员会不会运行（设置 → 内置大模型）</div>':'';
+  const recent=tl.slice(0,5).map(e=>`<div><span class="t">${e.time.slice(6)}</span><span>${e.icon}</span><div>${esc(e.title)}</div></div>`).join('');
+  if(ACCT=='paper')return `<div class="card" style="margin-bottom:14px;border-color:#4c9aff55"><h3>🤖 AI 自动驾驶 · 模拟盘 ${sw}</h3>
+    <div class="mute"><small>下面 4 个环节每天自动跑，<b>你不用点任何按钮</b>。想看 AI 做了什么、为什么，去「AI 动态」。</small></div>
+    <div class="steps">${ap.steps.map(s=>`<div class="${s.state}"><b>${esc(s.name)}</b><small>${esc(s.when)} · ${STEP_ST[s.state]}</small><small>${esc(s.note)}</small></div>`).join('')}</div>
+    <div class="row" style="margin-top:10px;gap:16px"><span>今天：AI 巡检 <b class="num">${t.decisions}</b> 次</span><span>委员会 <b class="num">${t.committee}</b> 次（通过 ${t.approved}）</span><span>模拟成交 <b class="num">${t.trades_paper}</b> 笔</span><a class="r" href="#feed">AI 动态 →</a></div>
+    ${recent?`<div class="tl" style="margin-top:6px">${recent}</div>`:''}${warn}</div>`;
+  return `<div class="card" style="margin-bottom:14px;border-color:#ff9f4366"><h3>🤝 实盘 · AI 建议，你来确认 ${sw}</h3>
+    <div class="row" style="gap:16px"><span>待你确认：<b class="num ${t.pending?'acc':''}" style="font-size:20px">${t.pending}</b> 笔</span>
+     ${t.pending?'<button class="pri" onclick="go(\'orders\')">去确认 →</button>':'<span class="mute">暂时没有需要你处理的</span>'}
+     <span class="mute">今天实盘成交 ${t.trades_live} 笔</span></div>
+    <div class="mute" style="margin-top:8px"><small>流程：AI 和模拟盘用同一个「大脑」（选股 + 委员会 + 巡检）→ 想买卖时，实盘不会自动下单，而是生成一张建议单并推送微信 → 你在这里点「确认」→ 打开券商 App 自己下单 → 回来填成交价。
+     ${on?'':'<br><b class="acc">现在 AI 不给实盘出建议</b>：建议先看模拟盘跑 2~4 周，表现稳定如需调整授权，请到设置页。'}</small></div>${warn}</div>`;
+}
+// ---------- AI 动态（时间线） ----------
+let FEED_F='all';
+async function pageFeed(){
+  const ev=await api('/api/timeline?account='+ACCT+'&days=7');
+  const kinds=[['all','全部'],['trade',ACCT=='paper'?'成交':'成交'],['committee','委员会'],['decision','AI 巡检'],['screen','选股']].concat(ACCT=='live'?[['order','建议单']]:[]);
+  const list=ev.filter(e=>FEED_F=='all'||e.kind==FEED_F);
+  let day='',html='';
+  for(const e of list){const d=e.time.slice(0,5);if(d!=day){day=d;html+=`<div class="tlday">${d}</div>`}
+    html+=`<div><span class="t">${e.time.slice(6)}</span><span>${e.icon}</span><div><a href="#${e.link}" ${e.run_id?`onclick="CUR_RUN=${e.run_id}"`:''} style="color:inherit;text-decoration:none">${esc(e.title)}</a>
+      ${e.detail?`<div class="d">${esc(e.detail)}</div>`:''}${(e.lines||[]).map(l=>`<div class="d">${esc(l)}</div>`).join('')}</div></div>`}
+  $('#app').innerHTML=`<div class="card"><h3>${ACCT=='paper'?'🤖 AI 在模拟盘做了什么（最近 7 天）':'📝 AI 给实盘的建议记录（最近 7 天）'}
+     <span class="r seg">${kinds.map(([k,t])=>`<button class="${k==FEED_F?'act':''}" onclick="FEED_F='${k}';pageFeed()">${t}</button>`).join('')}</span></h3>
+    <div class="mute"><small>${ACCT=='paper'?'每一步都记在这里：几点选了哪些股、委员会为什么通过/否决、AI 为什么买卖、哪笔是止损自动卖的。点标题看详情。'
+      :'选股和委员会和模拟盘共用；这里多了「建议单」——AI 想对实盘做的操作，都要你确认。'}</small></div>
+    <div class="tl">${html||'<div class="empty" style="display:block">还没有记录。交易日 9:00 后 AI 开始巡检，15:05 自动选股和开委员会。</div>'}</div></div>`;
+}
+
 function alertRow(a){return `<div><span class="mute num">${a.ts_str.slice(6)}</span> ${SIDE[a.side]||''} <b>${esc(a.name)}</b> <span class="tag">${a.source=='rule'?'规则':esc(a.strategy)}</span><br><small>${esc(a.message)}${a.action_result?' → '+esc(a.action_result):''}</small></div>`}
 async function drawEq(a){
   const rows=await api('/api/equity?account='+a+'&days=60');const el=$('#eq');if(!el)return;
@@ -627,14 +686,14 @@ async function setLive(){await post('/api/accounts/live/set',{cash:+$('#lcash').
 async function setLivePos(){await post('/api/accounts/live/set',{positions:[{symbol:$('#lsym').value,shares:+$('#lsh').value,avg_cost:+$('#lcost').value||0}]});toast('已设置')}
 
 // ---------- 路由 ----------
-const PAGES={dash:[pageDash,10000],watch:[pageWatch,3000],screen:[pageScreen,0],committee:[pageCommittee,3000],rules:[pageRules,0],strategies:[pageStrategies,0],backtest:[pageBacktest,0],ai:[pageAI,30000],orders:[pageOrders,10000],settings:[pageSettings,0]};
+const PAGES={dash:[pageDash,10000],feed:[pageFeed,15000],watch:[pageWatch,3000],screen:[pageScreen,0],committee:[pageCommittee,3000],rules:[pageRules,0],strategies:[pageStrategies,0],backtest:[pageBacktest,0],ai:[pageAI,30000],orders:[pageOrders,10000],settings:[pageSettings,0]};
 async function render(first){const [fn]=PAGES[page];if(!first&&page!='watch'){charts.forEach(c=>c.dispose());charts=[]}try{await fn(first)}catch(e){console.error(e)}}
 function route(){page=(location.hash.slice(1)||'dash');if(!PAGES[page])page='dash';
-  document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('act',a.getAttribute('href')=='#'+page));
+  applyAcct();
   charts.forEach(c=>c.dispose());charts=[];clearInterval(timer);
   render(true).then(()=>{if(page=='watch'&&stockSym)openStock(stockSym)});
   const iv=PAGES[page][1];if(iv)timer=setInterval(()=>{if(!document.hidden&&!document.activeElement.matches('input,textarea,select'))render(false)},iv)}
-document.querySelectorAll('#acctSw button').forEach(b=>b.onclick=()=>setAcct(b.dataset.a));applyAcct();
+document.querySelectorAll('#acctSw button').forEach(b=>b.onclick=()=>setAcct(b.dataset.a));
 window.addEventListener('hashchange',route);route();status();setInterval(status,5000);
 </script>
 </body>

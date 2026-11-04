@@ -381,6 +381,18 @@ def api_screen(q, body):
     return {"running": True, "msg": "已开始"}
 
 
+@route("GET", "/api/autopilot")
+def api_autopilot(q, body):
+    from core import autopilot
+    return autopilot.status(MONITOR)
+
+
+@route("GET", "/api/timeline")
+def api_timeline(q, body):
+    from core import autopilot
+    return autopilot.timeline(q.get("account", "paper"), int(q.get("days", 3)))
+
+
 @route("GET", "/api/screen")
 def api_screen_get(q, body):
     from core import screener
