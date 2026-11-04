@@ -144,6 +144,10 @@ def init_db():
     c = _connect()
     try:
         c.executescript(SCHEMA)
+        # 迁移：选股结果按账户分开（模拟盘 / 实盘各选各的）
+        cols = [r[1] for r in c.execute("PRAGMA table_info(screens)").fetchall()]
+        if "account" not in cols:
+            c.execute("ALTER TABLE screens ADD COLUMN account TEXT DEFAULT 'paper'")
         cfg = load_config()
         now = time.time()
         first_run = not c.execute("SELECT 1 FROM accounts WHERE id='paper'").fetchone()

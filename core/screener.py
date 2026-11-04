@@ -278,15 +278,93 @@ def swing_score(s, kl, sec):
     return sc, why, metrics
 
 
-def run(save=True, top_n=None, progress=None):
+# ---- 运行状态（网页按钮和 15:05 自动流程共用，同一时间只跑一个） ----
+KLINE_BUDGET_SEC = 75      # 拉日K最多花这么久，超时就用已经拿到的（免费接口偶尔会被限流卡住）
+ENRICH_BUDGET_SEC = 30     # 资金流/公告补充最多花这么久
+_run_lock = threading.Lock()
+STATE = {"running": False, "account": "paper", "stage": "", "done": 0, "total": 0, "started": None, "msg": "", "trigger": "",
+         "finished": None, "seconds": None}
+_kcache = {}               # 日K缓存：symbol -> (过期时间, rows)
+
+
+def _stage(stage, done=0, total=0):
+    STATE.update(stage=stage, done=done, total=total, msg=stage + ("（%d/%d）" % (done, total) if total else ""))
+
+
+def status():
+    st = dict(STATE)
+    if st["running"] and st["started"]:
+        st["elapsed"] = round(time.time() - st["started"], 1)
+    return st
+
+
+def _kline_cached(sym):
+    now = time.time()
+    hit = _kcache.get(sym)
+    if hit and hit[0] > now:
+        return hit[1]
+    rows = market.get_kline(sym, "day", 130)
+    # 盘中 5 分钟过期；盘后日K不会再变，缓存 3 小时
+    _kcache[sym] = (now + (300 if market.is_market_open() else 10800), rows)
+    return rows
+
+
+def start_async(trigger="网页", account="paper"):
+    """后台选股，立刻返回。已经在跑就返回当前进度（不重复跑）。"""
+    if STATE["running"]:
+        return dict(status(), started_now=False)
+    STATE.update(running=True, account=account, started=time.time(), trigger=trigger, done=0, total=0,
+                 stage="准备中", msg="准备中")
+
+    def go():
+        try:
+            run(account=account)
+        except Exception as e:
+            log.exception("选股失败")
+            STATE["msg"] = "失败：%s" % e
+    threading.Thread(target=go, daemon=True, name="screener").start()
+    return dict(status(), started_now=True)
+
+
+def run(save=True, top_n=None, progress=None, account="paper"):
+    """跑一次选股漏斗（按账户各选各的）。同一账户别处正在跑时，等它跑完直接用它的结果。"""
+    if not _run_lock.acquire(blocking=False):
+        same = STATE.get("account") == account
+        _run_lock.acquire()
+        _run_lock.release()
+        lc = latest_candidates(top_n or 30, account)
+        if same and lc and time.time() - lc["ts_epoch"] < 300:
+            return lc
+        return run(save, top_n, progress, account)
+    STATE.update(running=True, account=account,
+                 started=STATE["started"] if STATE["running"] and STATE["started"] else time.time())
+    try:
+        res = _run(save, top_n, progress, account)
+        STATE.update(msg="完成：候选 %d 只，用时 %.0f 秒" % (len(res["candidates"]), res["stats"]["seconds"]),
+                     seconds=res["stats"]["seconds"], finished=time.time(), stage="完成")
+        return res
+    except Exception as e:
+        STATE.update(msg="失败：%s" % e, finished=time.time(), stage="失败")
+        raise
+    finally:
+        STATE["running"] = False
+        _run_lock.release()
+
+
+def _run(save=True, top_n=None, progress=None, account="paper"):
     cfg = load_config()
     db.init_db()
     _ensure_schema()
     t0 = time.time()
+    equity = broker.snapshot(account)["equity"]     # 先检查资金，不白跑接口
+    if equity <= 0:
+        raise ValueError("%s还没有资金，先在「持仓对账」录入券商账户的可用资金" % ("实盘" if account == "live" else "模拟盘"))
+    _stage("拉全市场快照")
     snap = snapshot_all(ttl=30)
+    _stage("板块和大盘状态")
     sec = sectors()
     regime = market_regime()
-    equity = max(broker.snapshot("paper")["equity"], 1)
+
     max_lot_value = equity * cfg["risk"]["max_position_pct"]
     universe = snap["stocks"] + snap["etfs"]
     passed, dropped = hard_filter(universe, cfg, max_lot_value)
@@ -294,12 +372,21 @@ def run(save=True, top_n=None, progress=None):
     pool = passed[:cfg["screener"]["kline_candidates"]]
     if progress:
         progress("初筛 %d → %d，拉日K %d 只" % (len(universe), len(passed), len(pool)))
+    _stage("初筛 %d → %d，拉日K细算" % (len(universe), len(passed)), 0, len(pool))
+    deadline = time.time() + KLINE_BUDGET_SEC
+    skipped = {"n": 0}
 
     def k(s):
+        if time.time() > deadline:          # 超出时间预算：剩下的不拉了
+            skipped["n"] += 1
+            return s, None
         try:
-            return s, market.get_kline(s["symbol"], "day", 130)
+            return s, _kline_cached(s["symbol"])
         except Exception:
             return s, None
+        finally:
+            STATE["done"] += 1
+            STATE["msg"] = "%s（%d/%d）" % (STATE["stage"], STATE["done"], STATE["total"])
     scored = []
     with ThreadPoolExecutor(max_workers=4) as ex:   # 免费接口，别并发太猛
         for s, kl in ex.map(k, pool):
@@ -311,9 +398,13 @@ def run(save=True, top_n=None, progress=None):
     scored.sort(key=lambda x: -x["score"])
     # 前40只补充资金流 + 公告风险
     deep = scored[:40]
+    _stage("前 %d 只查资金流和公告" % len(deep), 0, len(deep))
+    deadline2 = time.time() + ENRICH_BUDGET_SEC
 
     def enrich(x):
-        if x["board"] == "etf":
+        STATE["done"] += 1
+        STATE["msg"] = "%s（%d/%d）" % (STATE["stage"], STATE["done"], STATE["total"])
+        if x["board"] == "etf" or time.time() > deadline2:
             return x
         try:
             d = news.money_flow_daily(x["symbol"], 5)
@@ -339,20 +430,24 @@ def run(save=True, top_n=None, progress=None):
     top = deep[:top_n or cfg["screener"]["top_n"]]
     if pool and len(scored) < len(pool) * 0.5:
         log.warning("日K获取成功率低：%d/%d", len(scored), len(pool))
+    _stage("保存结果")
+    if skipped["n"]:
+        log.warning("日K拉取超出 %ds 预算，跳过 %d 只", KLINE_BUDGET_SEC, skipped["n"])
     stats = {"universe": len(universe), "passed": len(passed), "klined": len(scored), "kline_requested": len(pool),
+             "kline_skipped": skipped["n"],
              "dropped": dropped,
              "seconds": round(time.time() - t0, 1), "max_lot_value": round(max_lot_value)}
     sid = None
     if save:
-        sid = db.run("INSERT INTO screens(ts,regime,stats) VALUES(?,?,?)",
-                     (time.time(), json.dumps(regime, ensure_ascii=False), json.dumps(stats, ensure_ascii=False)))
+        sid = db.run("INSERT INTO screens(ts,regime,stats,account) VALUES(?,?,?,?)",
+                     (time.time(), json.dumps(regime, ensure_ascii=False), json.dumps(stats, ensure_ascii=False), account))
         with db.tx() as c:
             for i, x in enumerate(top):
                 c.execute("INSERT INTO candidates VALUES(?,?,?,?,?,?,?,?,?,?)",
                           (sid, i + 1, x["symbol"], x["name"], x["board"], x["industry"], round(x["score"], 2),
                            x["price"], x["pct"], json.dumps({"reasons": x["reasons"], "metrics": x["metrics"]},
                                                             ensure_ascii=False)))
-    return {"screen_id": sid, "regime": regime, "stats": stats,
+    return {"screen_id": sid, "account": account, "regime": regime, "stats": stats,
             "candidates": [{"rank": i + 1, "symbol": x["symbol"], "name": x["name"], "board": x["board"],
                             "industry": x["industry"], "score": round(x["score"], 2), "price": x["price"],
                             "pct": x["pct"], "reasons": x["reasons"], "metrics": x["metrics"]}
@@ -363,14 +458,14 @@ def _ensure_schema():
     db.init_db()
 
 
-def latest_candidates(limit=20):
+def latest_candidates(limit=20, account="paper"):
     _ensure_schema()
-    s = db.one("SELECT * FROM screens ORDER BY id DESC LIMIT 1")
+    s = db.one("SELECT * FROM screens WHERE COALESCE(account,'paper')=? ORDER BY id DESC LIMIT 1", (account,))
     if not s:
         return None
     rows = db.all("SELECT * FROM candidates WHERE screen_id=? ORDER BY rank LIMIT ?", (s["id"], limit))
     for r in rows:
         d = db.jloads(r.pop("details"), {})
         r.update(d)
-    return {"screen_id": s["id"], "ts": market.datetime.fromtimestamp(s["ts"], market.CN_TZ).strftime("%m-%d %H:%M"),
+    return {"screen_id": s["id"], "account": account, "ts_epoch": s["ts"], "ts": market.datetime.fromtimestamp(s["ts"], market.CN_TZ).strftime("%m-%d %H:%M"),
             "regime": db.jloads(s["regime"], {}), "stats": db.jloads(s["stats"], {}), "candidates": rows}

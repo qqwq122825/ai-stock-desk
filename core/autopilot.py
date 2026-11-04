@@ -29,7 +29,8 @@ def timeline(account="paper", days=3, limit=200):
     """把 选股 / 委员会 / AI 决策 / 成交 合成一条时间线（新→旧）。"""
     since = _day_start(days)
     ev = []
-    for s in db.all("SELECT * FROM screens WHERE ts>=? ORDER BY id DESC", (since,)):
+    for s in db.all("SELECT * FROM screens WHERE ts>=? AND COALESCE(NULLIF(account,''),'paper')=? ORDER BY id DESC",
+                    (since, account)):
         st, rg = db.jloads(s["stats"], {}) or {}, db.jloads(s["regime"], {}) or {}
         top = db.all("SELECT name FROM candidates WHERE screen_id=? ORDER BY rank LIMIT 5", (s["id"],))
         ev.append({"ts": s["ts"], "kind": "screen", "icon": "🔍", "title": "选股：全市场 %s → 过滤后 %s → 候选 %s 只" % (
@@ -38,7 +39,8 @@ def timeline(account="paper", days=3, limit=200):
             "detail": "大盘：%s（新开仓上限 %s%%）· 前几名：%s" % (
                 rg.get("state", "?"), int(float(rg.get("position_cap", 0) or 0) * 100),
                 "、".join(t["name"] for t in top) or "-"), "link": "screen"})
-    for r in db.all("SELECT * FROM committee_runs WHERE ts>=? ORDER BY id DESC", (since,)):
+    for r in db.all("SELECT * FROM committee_runs WHERE ts>=? AND COALESCE(NULLIF(account,''),'paper')=? ORDER BY id DESC",
+                    (since, account)):
         f = db.jloads(r["final"], {}) or {}
         st = {"approved": ("✅", "通过"), "rejected": ("❌", "否决"), "error": ("⚠️", "出错"),
               "running": ("⏳", "开会中"), "external": ("⏳", "外部AI开会中")}.get(r["status"], ("•", r["status"]))
@@ -88,7 +90,7 @@ def timeline(account="paper", days=3, limit=200):
     return ev[:limit]
 
 
-def status(monitor=None):
+def status(monitor=None, account="paper"):
     """自动流程每一环的状态 + 今日统计，给"AI 自动驾驶"卡片用。"""
     cfg = load_config()
     from . import llm
@@ -98,7 +100,7 @@ def status(monitor=None):
     trading_day = market.is_trading_day(now)
     hm = now.hour * 100 + now.minute
     last_dec = db.one("SELECT ts,trigger FROM decisions ORDER BY id DESC LIMIT 1")
-    last_screen = db.one("SELECT ts FROM screens ORDER BY id DESC LIMIT 1")
+    last_screen = db.one("SELECT ts FROM screens WHERE COALESCE(NULLIF(account,''),'paper')=? ORDER BY id DESC LIMIT 1", (account,))
     try:
         with open(os.path.join(DATA_DIR, "daily_close.done"), encoding="utf-8") as f:
             daily_done = f.read().strip() == today
@@ -124,8 +126,9 @@ def status(monitor=None):
     ]
     today_cnt = {
         "decisions": db.one("SELECT COUNT(*) n FROM decisions WHERE ts>=?", (t0,))["n"],
-        "committee": db.one("SELECT COUNT(*) n FROM committee_runs WHERE ts>=?", (t0,))["n"],
-        "approved": db.one("SELECT COUNT(*) n FROM committee_runs WHERE ts>=? AND status='approved'", (t0,))["n"],
+        "committee": db.one("SELECT COUNT(*) n FROM committee_runs WHERE ts>=? AND COALESCE(NULLIF(account,''),'paper')=?", (t0, account))["n"],
+        "approved": db.one("SELECT COUNT(*) n FROM committee_runs WHERE ts>=? AND COALESCE(NULLIF(account,''),'paper')=? AND status='approved'",
+                           (t0, account))["n"],
     }
     for a in ("paper", "live"):
         today_cnt["trades_" + a] = db.one("SELECT COUNT(*) n FROM trades WHERE account=? AND ts>=?", (a, t0))["n"]

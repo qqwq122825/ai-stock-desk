@@ -54,7 +54,7 @@ def on_fill(acct, symbol, name, side, price, decision_id=None):
     now = time.time()
     act = get_active(acct, symbol)
     if side == "buy":
-        run = committee.approved_run(symbol)
+        run = committee.approved_run(symbol, acct)
         f = (run or {}).get("final") or {}
         d = _defaults(price)
         fields = {

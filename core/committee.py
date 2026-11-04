@@ -78,7 +78,7 @@ def build_dossier(sym, account="paper", intent="open"):
     snap = broker.snapshot(account)
     cand = None
     try:
-        lc = screener.latest_candidates(50)
+        lc = screener.latest_candidates(50, account)
         if lc:
             cand = next((c for c in lc["candidates"] if c["symbol"] == sym), None)
     except Exception:
@@ -198,16 +198,15 @@ def finalize(run_id, final):
     return dict(final, run_id=run_id, status=status)
 
 
-def approved_run(sym, account=None):
-    """门禁：有效期内最近一次通过的委员会结论。"""
+def approved_run(sym, account="paper"):
+    """门禁：该账户有效期内最近一次通过的委员会结论（模拟盘和实盘的委员会互不通用）。"""
     hours = load_config()["committee"]["valid_hours"]
-    rows = db.all("SELECT * FROM committee_runs WHERE symbol=? AND status='approved' AND finished_at>=? "
-                  "ORDER BY id DESC LIMIT 1", (market.normalize(sym), time.time() - hours * 3600))
+    rows = db.all("SELECT * FROM committee_runs WHERE symbol=? AND COALESCE(NULLIF(account,''),'paper')=? AND status='approved' "
+                  "AND finished_at>=? ORDER BY id DESC LIMIT 1",
+                  (market.normalize(sym), account or "paper", time.time() - hours * 3600))
     if not rows:
         return None
     r = rows[0]
-    if account and r["account"] not in (account, None):
-        pass  # 结论对两个账户都适用，仓位按各自账户折算
     r["final"] = db.jloads(r["final"], {})
     return r
 
@@ -330,14 +329,14 @@ def _core(d):
         "news_today": (d.get("intel") or {}).get("news_today")}
 
 
-_running = {}      # symbol -> (thread, run_id)
+_running = {}      # (account, symbol) -> (thread, run_id)
 
 
 def run_async(sym, account="paper", intent="open", trigger="auto", then_execute=None):
     """后台跑内置委员会，立刻返回 {"started": bool, "run_id": int}。
     同一只股票已在开会时不重复开，返回进行中的会议号。then_execute=dict(决策动作) 时，通过后自动执行。"""
     sym = market.normalize(sym)
-    cur = _running.get(sym)
+    cur = _running.get((account, sym))
     if cur and cur[0].is_alive():
         return {"started": False, "run_id": cur[1]}
     rid = _new_run(sym, _name(sym), account, intent, "builtin", trigger)
@@ -362,7 +361,7 @@ def run_async(sym, account="paper", intent="open", trigger="auto", then_execute=
         except Exception as e:
             log.error("委员会失败 %s: %s", sym, e)
     t = threading.Thread(target=_go, daemon=True, name="committee-%d" % rid)
-    _running[sym] = (t, rid)
+    _running[(account, sym)] = (t, rid)
     t.start()
     return {"started": True, "run_id": rid}
 

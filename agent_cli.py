@@ -113,7 +113,9 @@ def main():
     p.add_argument("symbols", nargs="*")
     p = sub.add_parser("screen")
     p.add_argument("--top", type=int)
-    sub.add_parser("candidates")
+    p.add_argument("--account", default="paper", help="paper 模拟盘 / live 实盘（两个账户的选股互不共用）")
+    p = sub.add_parser("candidates")
+    p.add_argument("--account", default="paper")
     p = sub.add_parser("daily-close")
     p.add_argument("--force", action="store_true", help="非交易日也执行")
     p = sub.add_parser("committee")
@@ -247,13 +249,13 @@ def main():
         out(screener.market_regime())
     elif a.cmd == "screen":
         from core import screener
-        out(screener.run(top_n=a.top, progress=lambda m: print(m, file=sys.stderr)))
+        out(screener.run(top_n=a.top, progress=lambda m: print(m, file=sys.stderr), account=a.account))
     elif a.cmd == "daily-close":
         from core import daily
         out(daily.run_daily_close(progress=lambda m: print(m, file=sys.stderr), force=a.force))
     elif a.cmd == "candidates":
         from core import screener
-        out(screener.latest_candidates(30) or {"message": "还没有选股结果，先运行 screen"})
+        out(screener.latest_candidates(30, a.account) or {"message": "还没有选股结果，先运行 screen"})
     elif a.cmd == "committee":
         from core import committee
         args = a.args

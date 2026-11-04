@@ -518,6 +518,69 @@ class TestDailyClose(Base):
         self.assertIn("入场≤10.2", w["note"])
         self.assertTrue(any("收盘总结" in t or "通过" in c for t, c in [(x[0], x[1]) for x in SENT]))
 
+    def test_accounts_are_separate(self):
+        """模拟盘和实盘：选股结果、委员会结论、收盘流程互不共用。"""
+        from core import daily, committee, llm
+        db.init_db()
+        sid = db.run("INSERT INTO screens(ts,regime,stats,account) VALUES(?,?,?,?)", (time.time(), "{}", "{}", "paper"))
+        db.run("INSERT INTO candidates VALUES(?,?,?,?,?,?,?,?,?,?)", (sid, 1, "sz000001", "平安", "main", "", 9, 10, 1, "{}"))
+        self.assertEqual(len(screener.latest_candidates(10, "paper")["candidates"]), 1)
+        self.assertIsNone(screener.latest_candidates(10, "live"))
+        db.run("INSERT INTO committee_runs(ts,symbol,account,status,finished_at,final) VALUES(?,?,?,?,?,?)",
+               (time.time(), "sz000001", "paper", "approved", time.time(), "{}"))
+        self.assertIsNotNone(committee.approved_run("sz000001", "paper"))
+        self.assertIsNone(committee.approved_run("sz000001", "live"))     # 模拟盘的通过不解锁实盘
+        # 收盘流程只跑交给 AI 的账户
+        seen = []
+        old = (screener.run, committee.run_builtin, llm.enabled)
+        screener.run = lambda **k: seen.append(k.get("account")) or {
+            "screen_id": 1, "candidates": [], "regime": {"state": "震荡", "position_cap": 0.5}}
+        llm.enabled = lambda: True
+        try:
+            daily.run_daily_close(force=True)
+            self.assertEqual(seen, ["paper"])
+            config.save_config({"ai": {"accounts": ["paper", "live"]}})
+            daily.run_daily_close(force=True)
+            self.assertEqual(seen, ["paper", "paper", "live"])
+        finally:
+            screener.run, committee.run_builtin, llm.enabled = old
+            config.save_config({"ai": {"accounts": ["paper"]}})
+
+    def test_screen_live_without_cash_and_budget(self):
+        """实盘没录资金时给清楚的提示；日K超出时间预算时跳过剩下的，不会一直卡住。"""
+        with self.assertRaises(ValueError) as cm:
+            screener.run(account="live")
+        self.assertIn("录入", str(cm.exception))
+        self.assertFalse(screener.STATE["running"])
+        universe = [{"symbol": "sz%06d" % i, "name": "股%d" % i, "price": 10, "pct": 1, "amount": 5e8, "turnover": 2,
+                     "pe": 10, "vol_ratio": 1, "high": 10, "low": 9.5, "open": 9.8, "prev_close": 9.9, "total_mv": 1e10,
+                     "pb": 1, "list_date": "20100101", "main_net": 0, "main_pct": 0, "industry": "x", "board": "main"}
+                    for i in range(1, 31)]
+        old = (screener.snapshot_all, screener.KLINE_BUDGET_SEC, screener._kline_cached, news.money_flow_daily,
+               news.announcements)
+        calls = []
+
+        def slow(sym):
+            calls.append(sym)
+            time.sleep(0.3)
+            return fake_kline(sym, "day", 130)
+        screener.snapshot_all = lambda ttl=60: {"stocks": universe, "etfs": []}
+        screener.KLINE_BUDGET_SEC = 0.5
+        screener._kline_cached = slow
+        news.money_flow_daily = lambda s, n=5: []
+        news.announcements = lambda s, n=8: []
+        try:
+            t0 = time.time()
+            res = screener.run(account="paper")
+        finally:
+            (screener.snapshot_all, screener.KLINE_BUDGET_SEC, screener._kline_cached, news.money_flow_daily,
+             news.announcements) = old
+        self.assertLess(time.time() - t0, 3)
+        self.assertGreater(res["stats"]["kline_skipped"], 0)
+        self.assertLess(len(calls), 30)
+        self.assertEqual(res["account"], "paper")
+        self.assertEqual(screener.STATE["stage"], "完成")
+
     def test_icepoint_skips_committee(self):
         from core import daily, committee, llm
         old = (screener.run, committee.run_builtin, llm.enabled)
@@ -820,7 +883,7 @@ class TestCommitteeAndPlans(Base):
             self.assertEqual(run["status"], "running")
             self.assertIn("stage", run["progress"])
             gate.set()
-            committee._running["sz000001"][0].join(10)
+            committee._running[("paper", "sz000001")][0].join(10)
         finally:
             gate.set()
             llm.enabled, llm.chat, notify.send = old

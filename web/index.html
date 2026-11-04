@@ -321,7 +321,7 @@ function setAcct(a){if(a===ACCT||$('#warp').className)return;
   w.style.setProperty('--x',(r.left+r.width/2)+'px');w.style.setProperty('--y',(r.top+r.height/2)+'px');
   w.dataset.mode=a;w.innerHTML=`<div><div class="wi">${M.icon}</div><div class="wt">${M.warp}</div><div class="ws">${M.warpSub}</div></div>`;
   w.className='in';$('#modeSw').classList.toggle('on',a=='live');
-  setTimeout(()=>{ACCT=a;try{localStorage.setItem('acct',a)}catch(e){}
+  setTimeout(()=>{ACCT=a;CUR_RUN=null;RUN_SIG='';LIST_SIG='';try{localStorage.setItem('acct',a)}catch(e){}
     if(location.hash.slice(1)===M.home)route();else location.hash=M.home;
     setTimeout(()=>{w.className='out';setTimeout(()=>w.className='',520)},250)},700);
 }
@@ -370,7 +370,7 @@ function tradeTable(ts){return `<div class="scroll"><table><tr><th>时间</th><t
   ${ts.map(t=>`<tr title="${esc(t.note)}"><td class="mute">${t.ts_str}</td><td>${esc(t.name)}</td><td>${SIDE[t.side]}</td><td class="n">${f2(t.price,3)}</td><td class="n">${t.shares}</td><td class="n">${f2(t.fee)}</td><td class="n ${pc(t.pnl)}">${t.pnl==null?'':sg(t.pnl)}</td><td><span class="tag">${{ai:'AI',plan:'持仓计划',rule:'规则',manual:'手动'}[t.source]||esc(t.source)}</span></td></tr>`).join('')||'<tr><td colspan=8 class="empty">暂无成交</td></tr>'}</table></div>`}
 // ================= 🛰 模拟盘：AI 驾驶舱 =================
 async function pageCockpit(first){
-  const [ov,ap,tl,pl]=await Promise.all([api('/api/overview'),api('/api/autopilot'),api('/api/timeline?account=paper&days=3'),api('/api/plans').catch(()=>({active:[]}))]);
+  const [ov,ap,tl,pl]=await Promise.all([api('/api/overview'),api('/api/autopilot?account=paper'),api('/api/timeline?account=paper&days=3'),api('/api/plans').catch(()=>({active:[]}))]);
   const s=ov.accounts.paper,on=ap.ai_accounts.includes('paper'),t=ap.today;
   if(first||!$('#ck')){
     $('#app').innerHTML=`<div id="tick">${ticker(ov,null)}</div>
@@ -422,7 +422,7 @@ function orderCard(o){return `<div class="order"><div class="row">${SIDE[o.side]
        <button class="pri" onclick="fill(${o.id})">已成交，回填</button><button onclick="ordOp(${o.id},'reject')">没成交 / 撤销</button>`}</div></div>`}
 const PEND_ST=['pending_confirm','confirmed','submitted'];
 async function pageDesk(first){
-  const [ov,ap,os,tl,pl]=await Promise.all([api('/api/overview'),api('/api/autopilot'),api('/api/orders'),api('/api/timeline?account=live&days=7'),api('/api/plans').catch(()=>({active:[]}))]);
+  const [ov,ap,os,tl,pl]=await Promise.all([api('/api/overview'),api('/api/autopilot?account=live'),api('/api/orders'),api('/api/timeline?account=live&days=7'),api('/api/plans').catch(()=>({active:[]}))]);
   const s=ov.accounts.live,on=ap.ai_accounts.includes('live'),pend=os.filter(o=>o.account=='live'&&PEND_ST.includes(o.status));
   if(first||!$('#dk')){
     $('#app').innerHTML=`<div id="tick">${ticker(ov,null)}</div>
@@ -591,29 +591,52 @@ function regimeCard(g){if(!g||g.error)return `<div class="card"><h3>大盘状态
    <div><small>沪深300 / MA20 / MA60</small><span class="num">${g.index?f2(g.index.hs300,0)+' / '+f2(g.index.ma20,0)+' / '+f2(g.index.ma60,0):'--'}</span></div></div>
   <div class="mute" style="margin-top:8px"><small>${(g.reasons||[]).map(esc).join('、')}</small></div></div>`}
 async function pageScreen(first){
-  const [s,g,runs,ov]=await Promise.all([api('/api/screen'),api('/api/regime').catch(e=>({error:e.message})),api('/api/committee').catch(()=>[]),api('/api/overview').catch(()=>null)]);
+  const [s,runs,ov]=await Promise.all([api('/api/screen?account='+ACCT),api('/api/committee?account='+ACCT).catch(()=>[]),api('/api/overview').catch(()=>null)]);
   const L=s.latest,held=new Set(ov?ov.accounts[ACCT].positions.map(p=>p.symbol):[]),last={};
   runs.forEach(r=>{if(!last[r.symbol])last[r.symbol]=r});
   const prog=c=>held.has(c.symbol)?'<span class="tag ok">已持有</span>':last[c.symbol]?RUN_ST(last[c.symbol]):'<span class="tag">未审核</span>';
-  $('#app').innerHTML=`<div class="hint">${ACCT=='paper'?'<b>AI 今日选股</b>：每个交易日 15:05 自动从全市场选出候选，前 3 名自动送委员会，通过的由 AI 择机买入模拟盘。你不需要操作，想加快某只的审核可以点「加急审核」。'
-     :'<b>选股参考</b>：和模拟盘是同一批结果。实盘不会自动买，委员会通过后 AI 会生成建议单等你确认。'}</div>
-  <div class="grid g2" style="margin-bottom:14px">${regimeCard(g)}
-  <div class="card"><h3>选股漏斗（波段 1~4 周）</h3><div class="mute"><small>全A+ETF → 交易权限/ST/停牌/次新/成交额/一手买得起 → 日K打分（趋势/位置/动量/量能/板块/波动/追高惩罚）→ 前40补充5日主力资金和公告风险 → Top20</small></div>
-   <div class="row" style="margin-top:10px"><button class="pri" onclick="runScreen()" ${s.running?'disabled':''}>${s.running?'运行中…':'立即选股'}</button><span class="mute">${esc(s.msg||'')}</span></div>
-   ${L?`<div class="kv"><div><small>选股时间</small>${L.ts}</div><div><small>全市场</small><span class="num">${L.stats.universe}</span></div><div><small>过滤后</small><span class="num">${L.stats.passed}</span></div><div><small>耗时</small><span class="num">${L.stats.seconds}s</span></div></div>
-   <div class="mute" style="margin-top:6px"><small>剔除：${Object.entries(L.stats.dropped||{}).map(([k,v])=>k+' '+v).join('、')}</small></div>`:''}</div></div>
-  <div class="card"><h3>${ACCT=='paper'?'🎯 AI 候选池':'候选池（参考）'} <span class="mute r">右侧显示每只股票走到了哪一步</span></h3><div class="scroll"><table><tr><th>#</th><th>股票</th><th>行业</th><th class="n">得分</th><th class="n">现价</th><th class="n">涨幅</th><th>打分理由</th><th>进度</th><th></th></tr>
+  $('#app').innerHTML=`<div class="hint">${ACCT=='paper'?'<b>AI 今日选股 · 模拟盘专用</b>：每个交易日 15:05 自动选股，前 3 名自动送委员会，通过的由 AI 择机买入模拟盘。想加快某只的审核可以点「加急审核」。'
+     :'<b>实盘选股 · 实盘专用</b>：和模拟盘完全分开，按你实盘的资金算「一手买不买得起」。实盘不会自动买，委员会通过后 AI 生成建议单等你确认。'}</div>
+  <div class="grid g2" style="margin-bottom:14px"><div id="reg"><div class="card"><h3>大盘状态（择时）</h3><div class="mute">加载中…</div></div></div>
+  <div class="card"><h3>${ACCT=='paper'?'选股漏斗 · 模拟盘':'选股漏斗 · 实盘'}（波段 1~4 周）</h3><div class="mute"><small>全A+ETF → 交易权限/ST/停牌/次新/成交额/一手买得起 → 日K打分（趋势/位置/动量/量能/板块/波动/追高惩罚）→ 前40补充5日主力资金和公告风险 → Top20</small></div>
+   <div id="sbox">${screenBox(s,L)}</div></div></div>
+  <div class="card"><h3>${ACCT=='paper'?'🎯 AI 候选池':'◆ 实盘候选池'} <span class="mute r">${L?'选于 '+L.ts+' · ':''}右侧是每只股票走到了哪一步</span></h3><div class="scroll"><table><tr><th>#</th><th>股票</th><th>行业</th><th class="n">得分</th><th class="n">现价</th><th class="n">涨幅</th><th>打分理由</th><th>进度</th><th></th></tr>
   ${L?L.candidates.map(c=>`<tr><td>${c.rank}</td><td><a href="javascript:openStock('${c.symbol}')">${esc(c.name)}</a> <small class="mute">${c.symbol}</small></td><td>${esc(c.industry)}</td>
    <td class="n acc">${f2(c.score,1)}</td><td class="n">${f2(c.price,2)}</td><td class="n ${pc(c.pct)}">${sg(c.pct)}%</td><td style="white-space:normal;min-width:320px"><small>${(c.reasons||[]).map(esc).join('、')}</small></td>
-   <td>${prog(c)}</td><td><button class="sm" onclick="toCommittee('${c.symbol}',this)">${ACCT=='paper'?'加急审核':'送委员会'}</button> <button class="sm" onclick="quickWatch('${c.symbol}')">+自选</button></td></tr>`).join(''):'<tr><td colspan=9 class="empty">还没有选股结果，点"立即选股"</td></tr>'}</table></div></div>`;
-  if(s.running)setTimeout(()=>{if(page=='screen')pageScreen()},3000);
+   <td>${prog(c)}</td><td><button class="sm" onclick="toCommittee('${c.symbol}',this)">${ACCT=='paper'?'加急审核':'送委员会'}</button> <button class="sm" onclick="quickWatch('${c.symbol}')">+自选</button></td></tr>`).join('')
+   :`<tr><td colspan=9 class="empty">${ACCT=='paper'?'还没有选股结果，点"立即选股"':'实盘还没选过股。先在「持仓对账」录入资金，再点"立即选股"'}</td></tr>`}</table></div></div>`;
+  // 大盘状态单独加载，接口慢也不挡住页面
+  api('/api/regime').catch(e=>({error:e.message})).then(g=>{const e=$('#reg');if(e&&page=='screen')e.innerHTML=regimeCard(g)});
+  if(s.running)pollScreen();
 }
-async function runScreen(){await post('/api/screen');toast('选股已开始，约10~20秒');pageScreen()}
+function screenBox(s,L){
+  const mine=!s.running||s.account==ACCT, other=s.account=='live'?'实盘':'模拟盘';
+  if(s.running){const pct=s.total?Math.round(s.done/s.total*100):0;
+    return `<div class="order" style="border-color:var(--accent);margin-top:10px"><div class="row"><b>⏳ ${mine?'正在选股':other+'正在选股，等它完成后再点'}</b><span class="mute r">已用 ${Math.round(s.elapsed||0)}s</span></div>
+     <div style="margin:6px 0">${esc(s.stage||'准备中')}${s.total?` <b class="num">${s.done}/${s.total}</b>`:''}</div>
+     <div style="height:6px;background:var(--panel2);border-radius:3px"><div style="width:${s.total?Math.max(3,pct):8}%;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:3px;transition:width .5s;${s.total?'':'animation:pulse 1.2s infinite'}"></div></div>
+     <div class="mute" style="margin-top:6px;font-size:12px">通常 15~40 秒；免费数据接口被限流时最多约 2 分钟（超时的股票会跳过）。可以离开这个页面。</div></div>`}
+  const fail=s.msg&&s.msg.startsWith('失败');
+  return `<div class="row" style="margin-top:10px"><button class="pri" onclick="runScreen(this)">立即选股</button>
+     ${s.msg?`<span class="${fail?'up':'mute'}">${esc(s.msg)}${s.account&&s.account!=ACCT&&!fail?'（'+(s.account=='live'?'实盘':'模拟盘')+'）':''}</span>`:''}</div>
+   ${L?`<div class="kv"><div><small>选股时间</small>${L.ts}</div><div><small>全市场</small><span class="num">${L.stats.universe}</span></div><div><small>过滤后</small><span class="num">${L.stats.passed}</span></div><div><small>耗时</small><span class="num">${L.stats.seconds}s</span></div></div>
+   <div class="mute" style="margin-top:6px"><small>剔除：${Object.entries(L.stats.dropped||{}).map(([k,v])=>k+' '+v).join('、')}${L.stats.kline_skipped?`；接口慢，跳过 ${L.stats.kline_skipped} 只`:''}</small></div>`:''}`}
+let SPOLL=null;
+function pollScreen(){clearTimeout(SPOLL);SPOLL=setTimeout(async()=>{
+  if(page!='screen')return;
+  let s;try{s=await api('/api/screen?light=1')}catch(e){return pollScreen()}
+  if(page!='screen')return;
+  if(s.running){const b=$('#sbox');if(b)b.innerHTML=screenBox(s,null);pollScreen()}
+  else{pageScreen(true);if(s.account==ACCT)toast(s.msg.startsWith('失败')?'❌ '+esc(s.msg):'✅ 选股'+esc(s.msg))}},1500)}
+async function runScreen(btn){if(btn){btn.disabled=true;btn.textContent='启动中…'}
+  const s=await post('/api/screen',{account:ACCT});
+  if(!s.started_now&&s.account!=ACCT)toast((s.account=='live'?'实盘':'模拟盘')+'正在选股，等它完成后再点');
+  const b=$('#sbox');if(b)b.innerHTML=screenBox(s,null);pollScreen()}
 async function quickWatch(s){const r=await post('/api/watchlist',{symbol:s,note:'选股候选'});toast('已加入自选 '+r.name)}
 async function toCommittee(s,btn){
   if(btn){btn.disabled=true;btn.textContent='送审中…'}
   try{
-    const r=await post('/api/committee/run',{symbol:s});
+    const r=await post('/api/committee/run',{symbol:s,account:ACCT});
     toast(r.started?`委员会 #${r.run_id} 已开会，约 1~3 分钟。<br>可以离开这个页面，结束后会推送微信。`:`这只股票正在开会（#${r.run_id}），带你去看进度`);
     CUR_RUN=r.run_id;go('committee');
   }catch(e){
@@ -627,7 +650,7 @@ let CUR_RUN=null,RUN_SIG='',LIST_SIG='';
 const RUN_ST=r=>r.status=='approved'?'<span class="tag ok">通过 '+esc(r.decision||'')+'</span>':r.status=='rejected'?'<span class="tag bad">未通过</span>'
   :r.status=='error'?'<span class="tag bad">出错</span>':r.status=='running'?'<span class="tag wait">⏳ 开会中</span>':'<span class="tag wait">'+esc(r.status)+'</span>';
 async function pageCommittee(first){
-  const rs=await api('/api/committee');
+  const rs=await api('/api/committee?account='+ACCT);
   if(first||!$('#clist')){
     $('#app').innerHTML=`<div class="grid g21"><div class="card" id="cdetail"><div class="empty">选择右侧一次会议查看 11 位成员的意见<br><small>5 分析师 → 多空辩论 → 研究主管 → 交易员 → 风控官 → 组合经理</small></div></div>
     <div class="card"><h3>委员会会议</h3><div class="list" id="clist"></div></div></div>`;

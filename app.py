@@ -358,33 +358,16 @@ def api_flash(q, body):
     return news.flash_news(int(q.get("n", 20)))
 
 
-_screen_state = {"running": False, "msg": "", "result": None}
-
-
 @route("POST", "/api/screen")
 def api_screen(q, body):
-    import threading
     from core import screener
-    if _screen_state["running"]:
-        return {"running": True, "msg": _screen_state["msg"]}
-
-    def go():
-        _screen_state.update(running=True, msg="选股中…")
-        try:
-            _screen_state["result"] = screener.run(progress=lambda m: _screen_state.update(msg=m))
-            _screen_state["msg"] = "完成"
-        except Exception as e:
-            _screen_state["msg"] = "失败：%s" % e
-        finally:
-            _screen_state["running"] = False
-    threading.Thread(target=go, daemon=True).start()
-    return {"running": True, "msg": "已开始"}
+    return screener.start_async("网页", body.get("account", "paper"))
 
 
 @route("GET", "/api/autopilot")
 def api_autopilot(q, body):
     from core import autopilot
-    return autopilot.status(MONITOR)
+    return autopilot.status(MONITOR, q.get("account", "paper"))
 
 
 @route("GET", "/api/timeline")
@@ -396,8 +379,10 @@ def api_timeline(q, body):
 @route("GET", "/api/screen")
 def api_screen_get(q, body):
     from core import screener
-    return {"running": _screen_state["running"], "msg": _screen_state["msg"],
-            "latest": screener.latest_candidates(30)}
+    st = screener.status()
+    if q.get("light"):          # 跑的过程中网页只轮询进度，不重复取候选
+        return st
+    return dict(st, latest=screener.latest_candidates(30, q.get("account", "paper")))
 
 
 @route("GET", "/api/regime")
@@ -415,7 +400,8 @@ def api_regime(q, body):
 @route("GET", "/api/committee")
 def api_committee_list(q, body):
     rows = db.all("SELECT id,ts,symbol,name,account,intent,mode,trigger,status,decision,confidence,price,error "
-                  "FROM committee_runs ORDER BY id DESC LIMIT 50")
+                  "FROM committee_runs WHERE COALESCE(NULLIF(account,''),'paper')=? ORDER BY id DESC LIMIT 50",
+                  (q.get("account", "paper"),))
     return fmt_rows(rows)
 
 

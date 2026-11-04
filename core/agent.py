@@ -215,11 +215,14 @@ def build_context(with_ticks=True, with_intel=True):
             regime = {"error": str(e)[:100]}
     try:
         from . import screener
-        lc = screener.latest_candidates(10)
-        if lc:
-            cands = {"screen_time": lc["ts"], "items": [
-                {k: c.get(k) for k in ("rank", "symbol", "name", "industry", "score", "price", "reasons")}
-                for c in lc["candidates"]]}
+        cands = {}
+        for ac in cfg["ai"]["accounts"]:      # 每个账户自己的候选池
+            lc = screener.latest_candidates(10, ac)
+            if lc:
+                cands[ac] = {"screen_time": lc["ts"], "items": [
+                    {k: c.get(k) for k in ("rank", "symbol", "name", "industry", "score", "price", "reasons")}
+                    for c in lc["candidates"]]}
+        cands = cands or None
     except Exception:
         pass
     from . import plans as plans_mod
@@ -230,7 +233,7 @@ def build_context(with_ticks=True, with_intel=True):
     planned = {(p["account"], p["symbol"]) for p in active_plans}
     no_plan = [{"account": p["account"], "symbol": p["symbol"], "name": p["name"]} for p in positions
                if (p["account"], p["symbol"]) not in planned]
-    runs = db.all("SELECT id,ts,symbol,name,status,decision,confidence,mode FROM committee_runs "
+    runs = db.all("SELECT id,ts,account,symbol,name,status,decision,confidence,mode FROM committee_runs "
                   "ORDER BY id DESC LIMIT 8")
     for r in runs:
         r["ts"] = market.datetime.fromtimestamp(r["ts"], market.CN_TZ).strftime("%m-%d %H:%M")
@@ -530,7 +533,7 @@ def apply_decision(dec, agent="external", trigger="timer"):
                 cap_pct = None
                 if side == "buy" and cfg["committee"]["required_for_buy"]:
                     from . import committee, llm
-                    run = committee.approved_run(q["symbol"])
+                    run = committee.approved_run(q["symbol"], acct)
                     if not run:
                         if cfg["committee"]["auto_run_builtin"] and llm.enabled():
                             started = committee.run_async(q["symbol"], acct, "add" if any(
