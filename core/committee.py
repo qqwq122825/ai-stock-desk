@@ -116,16 +116,36 @@ def build_dossier(sym, account="paper", intent="open"):
 
 
 # ---------------- 存储 ----------------
-def _create_run(sym, name, account, intent, mode, trigger, price, dossier):
+def _new_run(sym, name, account, intent, mode, trigger, price=None):
+    """先建会议记录（网页立刻能看到），档案稍后补上。"""
+    return db.run("INSERT INTO committee_runs(ts,symbol,name,account,intent,mode,trigger,status,price)"
+                  " VALUES(?,?,?,?,?,?,?,?,?)",
+                  (time.time(), sym, name, account, intent, mode, trigger, "running", price))
+
+
+def _save_dossier(rid, dossier):
     os.makedirs(DOSSIER_DIR, exist_ok=True)
-    rid = db.run("INSERT INTO committee_runs(ts,symbol,name,account,intent,mode,trigger,status,price)"
-                 " VALUES(?,?,?,?,?,?,?,?,?)",
-                 (time.time(), sym, name, account, intent, mode, trigger, "running", price))
     path = os.path.join(DOSSIER_DIR, "run_%d_dossier.json" % rid)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(dossier, f, ensure_ascii=False, indent=1, default=str)
-    db.run("UPDATE committee_runs SET dossier_path=? WHERE id=?", (path, rid))
+    db.run("UPDATE committee_runs SET dossier_path=?,name=?,price=? WHERE id=?",
+           (path, dossier.get("name"), (dossier.get("quote") or {}).get("price"), rid))
+
+
+def _create_run(sym, name, account, intent, mode, trigger, price, dossier):
+    rid = _new_run(sym, name, account, intent, mode, trigger, price)
+    _save_dossier(rid, dossier)
     return rid
+
+
+# 进行中会议的进度（内存，给网页显示）：run_id -> {stage, step, total, started}
+PROGRESS = {}
+
+
+def _progress(rid, step, total, stage):
+    PROGRESS[rid] = {"stage": stage, "step": step, "total": total,
+                     "started": PROGRESS.get(rid, {}).get("started", time.time())}
+    log.info("委员会#%d [%d/%d] %s", rid, step, total, stage)
 
 
 def save_opinion(run_id, role, op, rnd=1):
@@ -202,6 +222,11 @@ def get_run(run_id):
     for o in r["opinions"]:
         o["content"] = db.jloads(o["content"], {})
         o["role_name"] = ROLE_NAMES.get(o["role"], o["role"])
+    p = PROGRESS.get(run_id)
+    if p:
+        r["progress"] = dict(p, elapsed=round(time.time() - p["started"]))
+    elif r["status"] == "running" and time.time() - (r["ts"] or 0) > 900:
+        r["progress"] = {"stage": "可能已中断（程序重启过？）", "step": 0, "total": 1, "elapsed": 0, "stale": True}
     return r
 
 
@@ -228,7 +253,7 @@ def _brief(op):
     return {k: op[k] for k in keep if k in op}
 
 
-def run_builtin(sym, account="paper", intent="open", trigger="manual", progress=None):
+def run_builtin(sym, account="paper", intent="open", trigger="manual", progress=None, rid=None):
     from . import llm
     if not llm.enabled():
         raise RuntimeError("内置大模型未启用，请用外部模式：agent_cli.py committee start %s" % sym)
@@ -237,12 +262,20 @@ def run_builtin(sym, account="paper", intent="open", trigger="manual", progress=
         ai_cfg["llm_model"] = ai_cfg["committee_model"]
     rounds = load_config()["committee"]["debate_rounds"]
     roles = load_roles()
-    say = progress or (lambda m: log.info(m))
-    dossier = build_dossier(sym, account, intent)
-    rid = _create_run(dossier["symbol"], dossier["name"], account, intent, "builtin", trigger,
-                      dossier["quote"]["price"], dossier)
+    sym = market.normalize(sym)
+    total = 2 + rounds + 4      # 档案、分析师、N轮辩论、主管、交易员、风控、组合经理
+    if rid is None:
+        rid = _new_run(sym, _name(sym), account, intent, "builtin", trigger)
+    ext = progress or (lambda m: None)
+
+    def say(step, stage):
+        _progress(rid, step, total, stage)
+        ext("#%d %s" % (rid, stage))
     try:
-        say("#%d %s 分析师并行中…" % (rid, dossier["name"]))
+        say(1, "准备档案：行情、资金、新闻、财务、大盘…")
+        dossier = build_dossier(sym, account, intent)
+        _save_dossier(rid, dossier)
+        say(2, "5 位分析师并行分析中…")
         with ThreadPoolExecutor(max_workers=5) as ex:
             ops = dict(zip(ANALYSTS, ex.map(lambda r: _ask(r, {"dossier": dossier}, roles, ai_cfg), ANALYSTS)))
         for r, op in ops.items():
@@ -250,7 +283,7 @@ def run_builtin(sym, account="paper", intent="open", trigger="manual", progress=
         reports = {ROLE_NAMES[r]: _brief(op) for r, op in ops.items()}
         debate = []
         for rnd in range(1, rounds + 1):
-            say("#%d 多空辩论 第%d轮" % (rid, rnd))
+            say(2 + rnd, "多空辩论 第 %d/%d 轮…" % (rnd, rounds))
             bull = _ask("bull", {"round": rnd, "dossier_core": _core(dossier), "analyst_reports": reports,
                                  "debate_so_far": debate}, roles, ai_cfg)
             save_opinion(rid, "bull", bull, rnd)
@@ -259,28 +292,30 @@ def run_builtin(sym, account="paper", intent="open", trigger="manual", progress=
                                  "debate_so_far": debate}, roles, ai_cfg)
             save_opinion(rid, "bear", bear, rnd)
             debate.append({"role": "空头", "round": rnd, **_brief(bear)})
-        say("#%d 研究主管裁判" % rid)
+        say(3 + rounds, "研究主管裁判中…")
         mgr = _ask("research_manager", {"dossier_core": _core(dossier), "analyst_reports": reports,
                                         "debate": debate}, roles, ai_cfg)
         save_opinion(rid, "research_manager", mgr)
-        say("#%d 交易员制定方案" % rid)
+        say(4 + rounds, "交易员制定买入方案…")
         trader = _ask("trader", {"dossier_core": _core(dossier), "research_manager": _brief(mgr),
                                  "account": dossier["account"], "risk_limits": dossier["risk_limits"]}, roles, ai_cfg)
         save_opinion(rid, "trader", trader)
-        say("#%d 风控审查" % rid)
+        say(5 + rounds, "风控官审查中…")
         risk = _ask("risk", {"dossier_core": _core(dossier), "trader_plan": _brief(trader),
                              "account": dossier["account"], "market_regime": dossier["market_regime"],
                              "risk_limits": dossier["risk_limits"], "fundamentals": dossier["fundamentals"]},
                     roles, ai_cfg)
         save_opinion(rid, "risk", risk)
-        say("#%d 组合经理拍板" % rid)
+        say(6 + rounds, "组合经理拍板中…")
         pm = _ask("pm", {"dossier_core": _core(dossier), "analyst_reports": reports, "debate": debate,
                          "research_manager": _brief(mgr), "trader": _brief(trader), "risk": _brief(risk),
                          "account": dossier["account"], "existing_plan": dossier["existing_plan"]}, roles, ai_cfg)
         res = finalize(rid, pm)
-        say("#%d 结论：%s（%s）" % (rid, res["decision"], res.get("summary", "")))
+        ext("#%d 结论：%s（%s）" % (rid, res["decision"], res.get("summary", "")))
+        PROGRESS.pop(rid, None)
         return res
     except Exception as e:
+        PROGRESS.pop(rid, None)
         db.run("UPDATE committee_runs SET status='error',error=?,finished_at=? WHERE id=?", (str(e), time.time(), rid))
         raise
 
@@ -295,18 +330,22 @@ def _core(d):
         "news_today": (d.get("intel") or {}).get("news_today")}
 
 
-_running = {}
+_running = {}      # symbol -> (thread, run_id)
 
 
 def run_async(sym, account="paper", intent="open", trigger="auto", then_execute=None):
-    """后台跑内置委员会；then_execute=dict(决策动作) 时，通过后自动执行。"""
+    """后台跑内置委员会，立刻返回 {"started": bool, "run_id": int}。
+    同一只股票已在开会时不重复开，返回进行中的会议号。then_execute=dict(决策动作) 时，通过后自动执行。"""
     sym = market.normalize(sym)
-    if _running.get(sym) and _running[sym].is_alive():
-        return False
+    cur = _running.get(sym)
+    if cur and cur[0].is_alive():
+        return {"started": False, "run_id": cur[1]}
+    rid = _new_run(sym, _name(sym), account, intent, "builtin", trigger)
+    _progress(rid, 0, 1, "排队中…")
 
     def _go():
         try:
-            res = run_builtin(sym, account, intent, trigger)
+            res = run_builtin(sym, account, intent, trigger, rid=rid)
             if then_execute and res["status"] == "approved":
                 act = dict(then_execute, symbol=sym, action="buy",
                            position_pct=min(float(then_execute.get("position_pct") or 1), res.get("position_pct") or 0.2),
@@ -322,15 +361,17 @@ def run_async(sym, account="paper", intent="open", trigger="auto", then_execute=
                             "**%s**  \n%s" % (res.get("summary", ""), "；".join(res.get("gate_notes", []))))
         except Exception as e:
             log.error("委员会失败 %s: %s", sym, e)
-    t = threading.Thread(target=_go, daemon=True)
-    _running[sym] = t
+    t = threading.Thread(target=_go, daemon=True, name="committee-%d" % rid)
+    _running[sym] = (t, rid)
     t.start()
-    return True
+    return {"started": True, "run_id": rid}
 
 
 def _name(sym):
-    r = db.one("SELECT name FROM quotes WHERE symbol=?", (sym,))
-    return r["name"] if r else sym
+    r = db.one("SELECT name FROM quotes WHERE symbol=?", (sym,)) or \
+        db.one("SELECT name FROM candidates WHERE symbol=? ORDER BY screen_id DESC LIMIT 1", (sym,)) or \
+        db.one("SELECT name FROM watchlist WHERE symbol=?", (sym,))
+    return r["name"] if r and r["name"] else sym
 
 
 # ---------------- 外部模式 ----------------

@@ -421,9 +421,8 @@ def api_committee_run(q, body):
     from core import committee
     if not llm.enabled():
         raise ValueError("内置大模型未启用。可让外部 AI 运行：python3 agent_cli.py committee start %s" % body["symbol"])
-    ok = committee.run_async(body["symbol"], body.get("account", "paper"), body.get("intent", "open"),
-                             trigger="网页手动")
-    return {"started": ok}
+    return committee.run_async(body["symbol"], body.get("account", "paper"), body.get("intent", "open"),
+                               trigger="网页手动")
 
 
 @route("GET", "/api/plans")

@@ -152,6 +152,7 @@ class Monitor(threading.Thread):
                     self._last_refresh = time.time()
                 broker.expire_pending()
                 self.premarket_brief(now)
+                self.daily_close(now, cfg)
                 self.check_restart(now)
                 self.status["last_error"] = None
             except Exception as e:
@@ -160,6 +161,40 @@ class Monitor(threading.Thread):
             self.status["loops"] += 1
             self.status["last_loop"] = time.time()
             self.stop_flag.wait(mcfg["poll_interval_sec"] if is_open else 15)
+
+    def daily_close(self, now, cfg):
+        """交易日 15:05~17:00 自动跑一次每日收盘流程（后台线程，不阻塞盯盘）。"""
+        if not cfg["screener"].get("auto_daily", True):
+            return
+        t, d = now.hour * 100 + now.minute, now.strftime("%Y%m%d")
+        if not (1505 <= t < 1700) or getattr(self, "_daily_day", None) == d:
+            return
+        if not market.is_trading_day(now):
+            return
+        # 重启后不重复跑：标记文件记录今天已执行
+        marker = os.path.join(DATA_DIR, "daily_close.done")
+        try:
+            with open(marker, encoding="utf-8") as f:
+                if f.read().strip() == d:
+                    self._daily_day = d
+                    return
+        except OSError:
+            pass
+        self._daily_day = d
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write(d)
+
+        def go():
+            from . import daily
+            try:
+                self.status["daily"] = "运行中"
+                r = daily.run_daily_close()
+                self.status["daily"] = "完成：通过%d/送审%d" % (len(r.get("approved", [])), len(r.get("reviewed", [])))
+            except Exception as e:
+                log.exception("每日收盘流程失败")
+                self.status["daily"] = "失败：%s" % e
+                notify.send("每日收盘流程失败", str(e))
+        threading.Thread(target=go, daemon=True, name="daily-close").start()
 
     def check_restart(self, now):
         """维护 AI 改完代码后写 data/restart.request，程序在非交易时段自己重启加载新代码（同一个窗口内）。"""

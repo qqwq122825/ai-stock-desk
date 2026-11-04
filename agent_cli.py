@@ -16,6 +16,7 @@
   python3 agent_cli.py regime                # 大盘情绪状态 + 总仓位上限
   python3 agent_cli.py screen                # 全市场选股漏斗 → Top20 候选池（约10~20秒）
   python3 agent_cli.py candidates            # 最近一次候选池
+  python3 agent_cli.py daily-close           # 每日收盘流程：选股→委员会审前N只→通过的加自选→推送总结（程序15:05会自动跑）
 
   投研委员会（建仓/加仓前必须通过）：
   python3 agent_cli.py committee start 600900      # 外部模式：建会议+生成档案，输出 run_id 和流程
@@ -113,6 +114,8 @@ def main():
     p = sub.add_parser("screen")
     p.add_argument("--top", type=int)
     sub.add_parser("candidates")
+    p = sub.add_parser("daily-close")
+    p.add_argument("--force", action="store_true", help="非交易日也执行")
     p = sub.add_parser("committee")
     p.add_argument("op", choices=["start", "opinion", "final", "run", "show", "list", "stats", "roles"])
     p.add_argument("args", nargs="*")
@@ -245,6 +248,9 @@ def main():
     elif a.cmd == "screen":
         from core import screener
         out(screener.run(top_n=a.top, progress=lambda m: print(m, file=sys.stderr)))
+    elif a.cmd == "daily-close":
+        from core import daily
+        out(daily.run_daily_close(progress=lambda m: print(m, file=sys.stderr), force=a.force))
     elif a.cmd == "candidates":
         from core import screener
         out(screener.latest_candidates(30) or {"message": "还没有选股结果，先运行 screen"})

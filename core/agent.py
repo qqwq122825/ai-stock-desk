@@ -537,9 +537,9 @@ def apply_decision(dec, agent="external", trigger="timer"):
                                 p["symbol"] == q["symbol"] for p in snap["positions"]) else "open",
                                 trigger="门禁:" + agent, then_execute={"accounts": [acct],
                                                                      "position_pct": act.get("position_pct")})
-                            r.update(status="committee_running", summary=None,
-                                     error="未过投研委员会，已%s内置委员会审核，通过后自动执行"
-                                           % ("启动" if started else "在进行"))
+                            r.update(status="committee_running", summary=None, committee_run=started["run_id"],
+                                     error="未过投研委员会，已%s内置委员会#%d审核，通过后自动执行"
+                                           % ("启动" if started["started"] else "在进行", started["run_id"]))
                             results["actions"].append(r)
                             continue
                         raise OrderError("新建仓/加仓需先通过投研委员会：python3 agent_cli.py committee start %s"

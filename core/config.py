@@ -89,6 +89,7 @@ DEFAULTS = {
         "kline_candidates": 150,        # 初筛后拉日K细算的数量
         "top_n": 20,                    # 候选池大小
         "committee_top": 3,             # 收盘复盘时送委员会审核的数量
+        "auto_daily": True,             # 交易日 15:05 自动选股+委员会（不需要外部 AI）
     },
     # 仓位管理
     "sizing": {
