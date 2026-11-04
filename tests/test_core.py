@@ -415,6 +415,76 @@ class TestMaintenance(Base):
             market.is_trading_session = old_sess
 
 
+class TestLogin(Base):
+    def setUp(self):
+        super().setUp()
+        import threading
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+        import app as app_mod
+        from core import auth
+        auth._fails.clear()
+        self.password = "fixture-login-value"
+        original_password = auth.PASSWORD
+        auth.PASSWORD = self.password
+        self.addCleanup(setattr, auth, "PASSWORD", original_password)
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), app_mod.Handler)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.base = "http://127.0.0.1:%d" % self.srv.server_address[1]
+        self.ur = urllib.request
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *a, **k):
+                return None
+        self.opener = urllib.request.build_opener(NoRedirect)
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+    def req(self, path, data=None, cookie=None, method=None):
+        r = self.ur.Request(self.base + path, data=json.dumps(data).encode() if data is not None else None,
+                            headers=dict({"Content-Type": "application/json"}, **({"Cookie": cookie} if cookie else {})),
+                            method=method)
+        try:
+            resp = self.opener.open(r, timeout=5)
+            return resp.status, resp.read(), resp.headers
+        except self.ur.HTTPError as e:
+            return e.code, e.read(), e.headers
+
+    def test_login_flow(self):
+        code, body, _ = self.req("/api/status")
+        self.assertEqual(code, 401)
+        self.assertTrue(json.loads(body)["login"])
+        code, _, h = self.req("/")
+        self.assertEqual((code, h["Location"]), (302, "/login"))
+        code, body, _ = self.req("/login")
+        self.assertEqual(code, 200)
+        self.assertIn("后台密码".encode(), body)
+        code, _, _ = self.req("/api/login", {"password": "wrong"})
+        self.assertEqual(code, 401)
+        code, body, h = self.req("/api/login", {"password": self.password})
+        self.assertEqual(code, 200)
+        cookie = h["Set-Cookie"].split(";")[0]
+        code, body, _ = self.req("/api/config", cookie=cookie)
+        self.assertEqual(code, 200)
+        code, _, _ = self.req("/", cookie=cookie)
+        self.assertEqual(code, 200)
+        code, _, _ = self.req("/api/config", cookie=cookie[:-3] + "abc")   # 篡改签名
+        self.assertEqual(code, 401)
+
+    def test_missing_password_fails_closed(self):
+        from core import auth
+        auth.PASSWORD = ""
+        self.assertEqual(self.req("/api/login", {"password": ""})[0], 401)
+        self.assertEqual(self.req("/api/login", {"password": self.password})[0], 401)
+
+    def test_bruteforce_lockout(self):
+        for _ in range(5):
+            self.assertEqual(self.req("/api/login", {"password": "x"})[0], 401)
+        self.assertEqual(self.req("/api/login", {"password": self.password})[0], 429)   # 锁定期间正确密码也不行
+
+
 class TestKlineFallback(Base):
     def test_fallback_and_breaker(self):
         calls = []

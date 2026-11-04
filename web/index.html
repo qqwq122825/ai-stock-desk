@@ -91,6 +91,7 @@ pre{white-space:pre-wrap;word-break:break-all;font-size:11px;background:#0b0f14;
   <nav id="nav">
     <a href="#dash">总览</a><a href="#watch">行情</a><a href="#screen">选股</a><a href="#committee">委员会</a><a href="#rules">规则预警</a><a href="#strategies">策略</a><a href="#backtest">回测</a>
     <a href="#ai">AI决策</a><a href="#orders">订单交易</a><a href="#settings">设置</a>
+    <a href="javascript:logout()" title="退出登录">退出</a>
   </nav>
 </header>
 <main id="app"></main>
@@ -102,10 +103,12 @@ const TOKEN=(()=>{const u=new URLSearchParams(location.search).get('token');try{
 async function api(path,opt={}){
   const r=await fetch(path,{method:opt.method||'GET',headers:{'Content-Type':'application/json','X-Token':TOKEN},body:opt.body?JSON.stringify(opt.body):undefined});
   const j=await r.json().catch(()=>({error:'响应解析失败'}));
+  if(r.status==401&&j.login){location.href='/login';throw new Error('需要登录')}
   if(!r.ok){toast('❌ '+(j.error||r.status));throw new Error(j.error)}
   return j;
 }
 const post=(p,b)=>api(p,{method:'POST',body:b||{}});
+async function logout(){await fetch('/api/logout',{method:'POST'});location.href='/login'}
 function toast(t){const e=$('#toast');e.innerHTML=t;e.style.display='block';clearTimeout(e._t);e._t=setTimeout(()=>e.style.display='none',4000)}
 const f2=(x,d=2)=>x==null||isNaN(x)?'--':Number(x).toFixed(d);
 const pc=x=>x==null?'':(x>0?'up':x<0?'down':'');

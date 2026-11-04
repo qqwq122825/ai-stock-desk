@@ -30,7 +30,7 @@ def send(title, content):
     if cfg.get("enabled"):
         if cfg.get("pushplus_token"):
             try:
-                r = json.loads(_post("http://www.pushplus.plus/send", {
+                r = json.loads(_post("https://www.pushplus.plus/send", {
                     "token": cfg["pushplus_token"], "title": title[:100],
                     "content": content, "template": "markdown"}))
                 good = r.get("code") == 200

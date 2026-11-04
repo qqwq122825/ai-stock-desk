@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from core import agent, broker, config, db, llm, market, notify, rules  # noqa: E402
+from core import agent, auth, broker, config, db, llm, market, notify, rules  # noqa: E402
 from core.engine import Monitor  # noqa: E402
 
 WEB_DIR = os.path.join(config.BASE_DIR, "web")
@@ -461,19 +461,65 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log.debug(fmt, *args)
 
-    def _send(self, code, data, ctype="application/json; charset=utf-8"):
+    def _send(self, code, data, ctype="application/json; charset=utf-8", headers=None):
         if not isinstance(data, (bytes, bytearray)):
             data = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(data)
+
+    def _client_ip(self):
+        ip = self.client_address[0]
+        if ip in ("127.0.0.1", "::1"):   # 只信任本机反向代理（nginx）转发的真实 IP
+            ip = (self.headers.get("X-Forwarded-For") or ip).split(",")[0].strip()
+        return ip
+
+    def _auth(self, method, u):
+        """返回 True 表示已处理（登录相关或拦截），False 表示放行。"""
+        if u.path == "/login":
+            with open(os.path.join(WEB_DIR, "login.html"), "rb") as f:
+                self._send(200, f.read(), "text/html; charset=utf-8")
+            return True
+        if u.path == "/api/login" and method == "POST":
+            ip = self._client_ip()
+            if not auth.allowed(ip):
+                self._send(429, {"error": "密码错误次数太多，请 10 分钟后再试"})
+                return True
+            try:
+                pw = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}").get("password")
+            except ValueError:
+                pw = None
+            if auth.check_password(pw):
+                log.info("后台登录成功 %s", ip)
+                self._send(200, {"ok": True}, headers={"Set-Cookie": auth.set_cookie_header(auth.make_session())})
+            else:
+                auth.record_fail(ip)
+                log.warning("后台密码错误 %s", ip)
+                self._send(401, {"error": "密码错误"})
+            return True
+        if u.path == "/api/logout":
+            self._send(200, {"ok": True}, headers={"Set-Cookie": auth.clear_cookie_header()})
+            return True
+        if u.path.endswith(".js") and os.path.isfile(os.path.join(WEB_DIR, os.path.basename(u.path))):
+            return False                    # 静态库（echarts）不需要登录
+        if auth.valid(self.headers.get("Cookie")):
+            return False
+        if u.path.startswith("/api/"):
+            self._send(401, {"error": "请先登录", "login": True})
+        else:
+            self._send(302, b"", "text/plain", headers={"Location": "/login"})
+        return True
 
     def _handle(self, method):
         u = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        if self._auth(method, u):
+            return
         if not u.path.startswith("/api/"):
             name = os.path.basename(u.path)
             static = os.path.join(WEB_DIR, name)
