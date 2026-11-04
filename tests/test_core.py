@@ -1,0 +1,672 @@
+"""离线单元测试（不联网，用假行情）。运行：python3 -m unittest discover tests -v"""
+import json
+import os
+import shutil
+import sys
+import tempfile
+import time
+import unittest
+
+TMP = tempfile.mkdtemp(prefix="aistock_test_")
+os.environ["AI_STOCK_DATA_DIR"] = TMP
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core import agent, broker, config, db, indicators, market, rules  # noqa: E402
+
+PRICES = {}
+
+
+def fake_quote(sym, price=10.0, pct=1.0, name=None, prev=None, vol_ratio=1.0, bid1=None, ask1=None):
+    sym = market.normalize(sym)
+    prev = prev or round(price / (1 + pct / 100), 2)
+    b1 = price - 0.01 if bid1 is None else bid1
+    a1 = price + 0.01 if ask1 is None else ask1
+    return {"symbol": sym, "code": sym[2:], "name": name or ("测试" + sym[2:]), "price": price,
+            "prev_close": prev, "open": prev, "volume": 1000000, "time": market.now().strftime("%Y%m%d%H%M%S"),
+            "change": price - prev, "pct": pct, "high": price, "low": prev, "amount": price * 1e6,
+            "turnover": 1, "pe": 10, "circ_mv": 100, "total_mv": 100, "pb": 1,
+            "limit_up": round(prev * 1.1, 2), "limit_down": round(prev * 0.9, 2), "vol_ratio": vol_ratio,
+            "bids": [[b1, 500]] + [[b1 - 0.01 * i, 100] for i in range(1, 5)],
+            "asks": [[a1, 500]] + [[a1 + 0.01 * i, 100] for i in range(1, 5)],
+            "bid1": b1, "ask1": a1, "suspended": False, "fetched_at": time.time(),
+            "date": market.today_str()}
+
+
+def fake_get_quotes(symbols):
+    out = {}
+    for s in symbols:
+        s = market.normalize(s)
+        out[s] = PRICES.get(s) or fake_quote(s)
+    return out
+
+
+def fake_kline(symbol, period="day", count=120):
+    base = 10.0
+    return [{"t": "2026-%02d-%02d" % (1 + i // 28, 1 + i % 28), "o": base + i * 0.01, "c": base + i * 0.01 + 0.005,
+             "h": base + i * 0.01 + 0.05, "l": base + i * 0.01 - 0.05, "v": 10000} for i in range(count)]
+
+
+market.get_quotes = fake_get_quotes
+REAL_GET_KLINE = market.get_kline
+market.get_kline = fake_kline
+market.is_trading_day = lambda dt=None: True
+market.is_market_open = lambda dt=None: True
+import core.news as news  # noqa: E402
+news.intel_many = lambda syms, names=None, quotes=None, workers=6: {}
+news.flash_news = lambda n=20: [{"time": "11-04 10:00", "text": "测试快讯"}]
+news.fundamentals = lambda sym: {"industry": "测试行业", "financials": []}
+news.intel = lambda sym, name=None, quote=None, news_n=8: {"news_today": {"count": 0, "pos": 0, "neg": 0}}
+import core.screener as screener  # noqa: E402
+REGIME = {"state": "强势", "position_cap": 0.9, "score": 3}
+screener.market_regime = lambda ttl=120: dict(REGIME)
+screener.sectors = lambda ttl=120: {}
+news.industry = lambda sym, name="": "半导体" if sym.endswith("000001") else ""
+import core.global_market as gm  # noqa: E402
+REAL_OVERNIGHT = gm.overnight
+
+
+def fake_ov(**pcts):
+    base = {"usDJI": 0.2, "usIXIC": 1.85, "usINX": 0.5, "usSOXX": -3.1, "usNVDA": -1.7, "usAAPL": 6.5,
+            "usTSLA": -3.5, "usHXC": 4.1, "hkHSI": 1.7, "hkHSTECH": 1.8}
+    base.update(pcts)
+    q = {k: {"name": gm.NAMES[k], "price": 1, "prev": 1, "pct": v, "time": ""} for k, v in base.items()}
+    return {"quotes": q, "summary": gm._summary(q), "fetched": "test"}
+
+
+gm.overnight = lambda ttl=600: fake_ov()
+import core.notify as notify  # noqa: E402
+SENT = []
+notify.send = lambda t, c: (SENT.append((t, c)) or (True, "test"))
+agent.notify.send = notify.send
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        if os.path.exists(db.DB_PATH):
+            os.remove(db.DB_PATH)
+        config.save_config({"paper": {"slippage_pct": 0, "initial_cash": 10000},
+                            "committee": {"required_for_buy": False}})
+        REGIME.update(state="强势", position_cap=0.9)
+        db.init_db()
+        PRICES.clear()
+        SENT.clear()
+        agent._kcache.clear()
+
+
+class TestFeesAndLots(Base):
+    def test_fees(self):
+        # 买 2000 元：佣金最低5 + 过户费0.02
+        self.assertAlmostEqual(broker.calc_fees("sz000001", "buy", 2000), 5.02, 2)
+        # 卖 100000：佣金25 + 印花税50 + 过户1
+        self.assertAlmostEqual(broker.calc_fees("sz000001", "sell", 100000), 76.0, 2)
+        # ETF 免印花税和过户费
+        self.assertAlmostEqual(broker.calc_fees("sh510300", "sell", 100000), 25.0, 2)
+
+    def test_lots(self):
+        self.assertEqual(broker.round_buy_shares("sz000001", 250), 200)
+        self.assertEqual(broker.round_buy_shares("sz000001", 99), 0)
+        self.assertEqual(broker.round_buy_shares("sh688001", 199), 0)
+        self.assertEqual(broker.round_buy_shares("sh688001", 253), 253)
+
+    def test_normalize(self):
+        self.assertEqual(market.normalize("600519"), "sh600519")
+        self.assertEqual(market.normalize("000001"), "sz000001")
+        self.assertEqual(market.normalize("300750"), "sz300750")
+        self.assertEqual(market.normalize("510300"), "sh510300")
+        self.assertEqual(market.normalize("600519.SH"), "sh600519")
+        self.assertEqual(market.normalize("920001"), "bj920001")
+
+
+class TestPaper(Base):
+    def test_buy_sell_t1(self):
+        PRICES["sz000001"] = fake_quote("000001", 10.0)
+        t = broker.paper_execute("000001", "buy", 300)
+        self.assertEqual(t["shares"], 300)
+        self.assertAlmostEqual(t["price"], 10.01)
+        s = broker.snapshot("paper")
+        self.assertAlmostEqual(s["cash"], 10000 - 3003 - 5.03, 2)
+        with self.assertRaises(broker.OrderError):     # T+1
+            broker.paper_execute("000001", "sell", 100)
+        # 模拟到了第二天
+        db.run("UPDATE positions SET last_buy_date='2000-01-01'")
+        t2 = broker.paper_execute("000001", "sell", 300)
+        self.assertEqual(t2["shares"], 300)
+        self.assertLess(t2["pnl"], 0)   # 买卖价差+费用
+        self.assertEqual(broker.get_positions("paper"), [])
+
+    def test_insufficient_cash_and_limit_up(self):
+        PRICES["sh600519"] = fake_quote("600519", 1446.0)
+        with self.assertRaises(broker.OrderError):
+            broker.paper_execute("600519", "buy", 100)
+        PRICES["sz000002"] = fake_quote("000002", 11.0, pct=10, ask1=0)
+        with self.assertRaises(broker.OrderError) as e:
+            broker.paper_execute("000002", "buy", 100)
+        self.assertIn("涨停", str(e.exception))
+
+
+class TestIndicators(Base):
+    def test_basic(self):
+        kl = fake_kline("x", count=120)
+        s = indicators.summarize(kl)
+        self.assertEqual(s["trend"], "多头排列")
+        self.assertGreater(s["rsi14"], 50)
+        self.assertIn("kdj", s)
+        self.assertIsNotNone(s["macd"])
+
+    def test_kdj_cross(self):
+        kl = [{"t": str(i), "o": 10, "c": 10 - i * 0.1, "h": 10.1, "l": 9 - i * 0.1, "v": 1} for i in range(20)]
+        kl.append({"t": "x", "o": 8, "c": 10.5, "h": 10.6, "l": 8, "v": 1})
+        k = indicators.kdj(kl)
+        self.assertEqual(k["cross"], "金叉")
+
+
+class TestRules(Base):
+    def test_edge_and_cooldown(self):
+        rules.add_rule("000001", "price_above", {"price": 10.5}, cooldown_min=0)
+        eng = rules.RuleEngine()
+        q = fake_quote("000001", 10.6)
+        args = ({"sz000001": q}, ["sz000001"], [], lambda s: [], lambda s: [])
+        n0 = len([a for a in eng.evaluate(*args) if a["rule"]["type"] == "price_above"])
+        n1 = len([a for a in eng.evaluate(*args) if a["rule"]["type"] == "price_above"])
+        self.assertEqual((n0, n1), (1, 0))  # 第二次不重复触发
+        q2 = fake_quote("000001", 10.0)
+        eng.evaluate({"sz000001": q2}, ["sz000001"], [], lambda s: [], lambda s: [])
+        n2 = len([a for a in eng.evaluate(*args) if a["rule"]["type"] == "price_above"])
+        self.assertEqual(n2, 1)  # 回落后再突破再次触发
+
+    def test_stop_loss_auto_sell(self):
+        PRICES["sz000001"] = fake_quote("000001", 10.0)
+        broker.paper_execute("000001", "buy", 500)
+        db.run("UPDATE positions SET last_buy_date='2000-01-01'")
+        db.run("DELETE FROM rules")
+        rules.add_rule("*POS", "stop_loss", {"pct": -5}, action="auto_sell", cooldown_min=0)
+        PRICES["sz000001"] = fake_quote("000001", 9.3, pct=-7)
+        al = rules.RuleEngine().evaluate({"sz000001": PRICES["sz000001"]}, [], broker.get_positions(),
+                                         lambda s: [], lambda s: [])
+        self.assertEqual(len(al), 1)
+        res = rules.run_action(al[0])
+        self.assertIn("自动卖出", res)
+        self.assertEqual(broker.get_positions("paper"), [])
+
+
+class TestAgent(Base):
+    def test_context_and_decision_paper(self):
+        PRICES["sz000001"] = fake_quote("000001", 10.0)
+        ctx = agent.build_context(with_ticks=False)
+        self.assertIn("sz000001", ctx["stocks"])
+        self.assertIn("paper", ctx["accounts"])
+        json.dumps(ctx, ensure_ascii=False, default=str)
+        res = agent.apply_decision({
+            "market_view": "测试", "actions": [
+                {"symbol": "000001", "action": "buy", "position_pct": 0.3, "confidence": 0.8, "reason": "测试买"},
+                {"symbol": "600036", "action": "buy", "shares": 100, "confidence": 0.3, "reason": "低置信"},
+                {"symbol": "000333", "action": "sell", "confidence": 0.9, "reason": "无持仓"}],
+            "rules_add": [{"symbol": "000001", "type": "price_below", "params": {"price": 9.5}}],
+            "watchlist_add": [{"symbol": "601318", "note": "AI加"}]})
+        st = [a["status"] for a in res["actions"]]
+        self.assertEqual(st, ["filled", "rejected", "rejected"])
+        self.assertEqual(res["actions"][0]["trade"]["shares"], 200)  # 3000/10.01 → 299 → 200
+        self.assertTrue(db.one("SELECT 1 FROM watchlist WHERE symbol='sh601318'"))
+        self.assertTrue(SENT)
+
+    def test_position_cap(self):
+        config.save_config({"risk": {"max_position_pct": 0.2}})
+        PRICES["sz000001"] = fake_quote("000001", 10.0)
+        res = agent.apply_decision({"actions": [{"symbol": "000001", "action": "buy", "position_pct": 0.9,
+                                                 "confidence": 0.9}]})
+        self.assertEqual(res["actions"][0]["trade"]["shares"], 100)  # 上限2000元 → 199股 → 100
+        config.save_config({"risk": {"max_position_pct": 0.4}})
+
+    def test_live_pending_confirm_fill(self):
+        config.save_config({"ai": {"accounts": ["paper", "live"]}})
+        broker.set_live_account(cash=50000)
+        PRICES["sz000001"] = fake_quote("000001", 10.0)
+        res = agent.apply_decision({"actions": [{"symbol": "000001", "action": "buy", "amount": 5000,
+                                                 "confidence": 0.9, "accounts": ["live"]}]})
+        a = res["actions"][0]
+        self.assertEqual(a["status"], "pending_confirm")
+        o = broker.confirm_order(a["order_id"])
+        self.assertEqual(o["status"], "confirmed")
+        t = broker.fill_order(o["id"], 10.02)
+        self.assertEqual(t["shares"], 400)
+        self.assertEqual(broker.get_positions("live")[0]["shares"], 400)
+        config.save_config({"ai": {"accounts": ["paper"]}})
+
+    def test_ticks_file(self):
+        q = fake_quote("000001", 10.0)
+        agent.append_tick(q)
+        q2 = dict(q, price=10.2, fetched_at=q["fetched_at"] + 120, volume=q["volume"] + 50000)
+        agent.append_tick(q2)
+        t = agent.read_ticks("000001")
+        self.assertEqual(len(t), 2)
+        self.assertEqual(agent.tick_stats("000001")["chg_1m_pct"], 2.0)
+
+
+class TestStrategies(Base):
+    def test_discover_and_run(self):
+        from core.engine import StrategyRunner
+        sr = StrategyRunner()
+        names = {d["name"] for d in sr.describe()}
+        self.assertTrue({"macd", "kdj", "rsi", "resonance", "orderbook", "tick_momentum"} <= names)
+        q = fake_quote("000001", 10.0)
+        kl = fake_kline("x", count=120)
+        sigs = sr.run("sz000001", q, kl, indicators.summarize(kl), [q])
+        self.assertIsInstance(sigs, list)
+
+
+class TestSizing(Base):
+    def _buy(self, **act):
+        db.run("DELETE FROM quotes")   # 清掉报价缓存，用最新假行情
+        a = dict(symbol="000001", action="buy", confidence=0.9)
+        a.update(act)
+        return agent.apply_decision({"actions": [a]})["actions"][0]
+
+    def test_risk_based(self):
+        PRICES["sz000001"] = fake_quote("000001", 10.0)
+        a = self._buy(stop_loss=9.5)               # 200元 ÷ (10.01-9.5) = 392 → 300股
+        self.assertEqual(a["status"], "filled", a)
+        self.assertEqual(a["trade"]["shares"], 300)
+        self.assertIn("单笔风险 200元", a["sizing"])
+        from core import plans
+        self.assertEqual(plans.get_active("paper", "000001")[0]["stop_loss"], 9.5)
+
+    def test_far_stop_rejected(self):
+        PRICES["sz000001"] = fake_quote("000001", 10.0)
+        a = self._buy(stop_loss=5.0)               # 200 ÷ 5.01 = 39股 < 一手
+        self.assertEqual(a["status"], "rejected")
+        self.assertIn("不足一手", a["error"])
+        self.assertIn("止损设近", a["error"])
+
+    def test_no_martingale_and_pyramid(self):
+        from core import plans
+        config.save_config({"risk": {"max_position_pct": 0.6}})   # 默认40%上限下，1万资金加不了一手
+        self.addCleanup(config.save_config, {"risk": {"max_position_pct": 0.4}})
+        PRICES["sz000001"] = fake_quote("000001", 10.0)
+        self.assertEqual(self._buy(stop_loss=9.5)["trade"]["shares"], 300)
+        PRICES["sz000001"] = fake_quote("000001", 9.6, pct=-4)
+        a = self._buy()
+        self.assertIn("禁止亏损补仓", a["error"])
+        PRICES["sz000001"] = fake_quote("000001", 10.4, pct=4)     # 浮盈 ~3.5% < 8%
+        self.assertIn("浮盈", self._buy()["error"])
+        PRICES["sz000001"] = fake_quote("000001", 11.0, pct=3)     # 浮盈 ~9.7%
+        a = self._buy(position_pct=0.4)
+        self.assertEqual(a["status"], "filled", a)
+        self.assertEqual(a["trade"]["shares"], 100)               # 300×50%=150 → 100
+        self.assertIn("金字塔第1次加仓", a["sizing"])
+        p = plans.get_active("paper", "000001")[0]
+        pos = broker.get_positions("paper")[0]
+        self.assertAlmostEqual(p["stop_loss"], round(pos["avg_cost"], 3))   # 止损上移到保本
+        config.save_config({"sizing": {"pyramid_max_adds": 1}})
+        PRICES["sz000001"] = fake_quote("000001", 12.5, pct=3)
+        self.assertIn("达到上限", self._buy()["error"])
+        config.save_config({"sizing": {"pyramid_max_adds": 2}})
+
+    def test_ai_cannot_lower_stop(self):
+        from core import plans
+        PRICES["sz000001"] = fake_quote("000001", 10.0)
+        self._buy(stop_loss=9.5)
+        res = agent.apply_decision({"plans": [{"symbol": "000001", "stop_loss": 9.0}]}, agent="ai")
+        self.assertIn("止损只能上移", res["plans"][0])
+        plans.update("paper", "000001", {"stop_loss": 9.0}, author="网页")
+        self.assertEqual(plans.get_active("paper", "000001")[0]["stop_loss"], 9.0)
+
+    def test_percent_mode(self):
+        config.save_config({"sizing": {"mode": "percent"}})
+        PRICES["sz000001"] = fake_quote("000001", 10.0)
+        a = self._buy(position_pct=0.3, stop_loss=5.0)           # 百分比模式不受止损距离影响
+        self.assertEqual(a["trade"]["shares"], 200)
+        config.save_config({"sizing": {"mode": "risk"}})
+
+
+class TestGlobal(Base):
+    def test_links_and_divergence(self):
+        ov = fake_ov()
+        chip = gm.link_for("半导体", ov)
+        self.assertEqual(chip["chain"], "半导体链")
+        self.assertLess(chip["avg_pct"], -2)
+        self.assertIn("承压", chip["hint"])
+        self.assertEqual(gm.link_for("消费电子", ov)["chain"], "消费电子/苹果链")
+        self.assertIsNone(gm.link_for("银行", ov))
+        self.assertTrue(any("分化" in n for n in ov["summary"]["notes"]))   # 纳指涨、半导体跌
+
+    def test_regime_adjust_morning_only(self):
+        ov = fake_ov(usINX=-3.0)
+        real_now = market.now
+        try:
+            market.now = lambda: real_now().replace(hour=9, minute=40)
+            d, reason = gm.regime_adjust(ov)
+            self.assertEqual(d, -1)
+            self.assertIn("外盘大跌", reason)
+            market.now = lambda: real_now().replace(hour=14, minute=0)
+            self.assertEqual(gm.regime_adjust(ov), (0, None))   # 午后不再修正
+        finally:
+            market.now = real_now
+
+    def test_context_has_overnight(self):
+        PRICES["sz000001"] = fake_quote("000001", 10.0)
+        ctx = agent.build_context(with_ticks=False)
+        self.assertIn("费城半导体ETF", ctx["global_overnight"]["quotes"])
+        self.assertEqual(ctx["stocks"]["sz000001"]["overnight_link"]["chain"], "半导体链")
+        self.assertNotIn("overnight_link", ctx["stocks"]["sh600036"])
+
+    def test_signal_push_filter(self):
+        from core.engine import Monitor
+        m = Monitor()
+        m.strats.instances = {}
+        sent = []
+        old_send = notify.send
+        self.addCleanup(setattr, notify, "send", old_send)
+        notify.send = lambda t, c: (sent.append(c) or (True, "t"))
+
+        class Fake:
+            label = "测试"
+            cooldown_min = 0
+
+            def on_bar(self, *a):
+                from strategies import Signal
+                return [Signal("watch", "只关注不推送", 0.9), Signal("buy", "强买入要推送", 0.7)]
+
+            def on_tick(self, *a):
+                return None
+        m.strats.instances = {"fake": (Fake(), {})}
+        q = fake_quote("000001", 10.0)
+        m.evaluate(config.load_config(), {"sz000001": q}, [], [], ["sz000001"])
+        self.assertEqual(len(sent), 1)
+        self.assertIn("强买入要推送", sent[0])
+        self.assertNotIn("只关注不推送", sent[0])
+        self.assertEqual(db.one("SELECT COUNT(*) n FROM alerts WHERE strategy='fake'")["n"], 2)  # 都记录了
+
+
+class TestMaintenance(Base):
+    def test_health_report(self):
+        from core import health
+        PRICES["sz000001"] = fake_quote("000001", 10.0)
+        agent.apply_decision({"actions": [{"symbol": "300750", "action": "buy", "confidence": 0.9}]})
+        os.makedirs(config.DATA_DIR, exist_ok=True)
+        with open(health.LOG_PATH, "a", encoding="utf-8") as f:
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            f.write("%s,001 ERROR [engine] 监控循环出错 boom 123\n%s,002 ERROR [engine] 监控循环出错 boom 456\n" % (ts, ts))
+        r = health.report(24)
+        self.assertEqual(r["log"]["errors"][0][1], 2)          # 两条同类错误合并
+        self.assertEqual(r["decisions"]["rejected_reasons"][0][1], 1)
+        self.assertTrue(any("推送未配置" in i for i in r["issues"]))
+        json.dumps(r, ensure_ascii=False, default=str)
+
+    def test_restart_only_offhours(self):
+        from core import engine, health
+        health.request_restart("测试")
+        self.assertTrue(os.path.exists(engine.RESTART_FLAG))
+        calls = []
+        old = os.execv
+        os.execv = lambda *a: calls.append(a)
+        old_sess = market.is_trading_session
+        try:
+            m = engine.Monitor()
+            market.is_trading_session = lambda dt=None: True
+            m.check_restart(market.now())
+            self.assertEqual(calls, [])                             # 交易时段不重启
+            self.assertTrue(os.path.exists(engine.RESTART_FLAG))
+            market.is_trading_session = lambda dt=None: False
+            m.check_restart(market.now())
+            self.assertEqual(len(calls), 1)                         # 非交易时段重启
+            self.assertFalse(os.path.exists(engine.RESTART_FLAG))   # 标记清掉，不会循环重启
+        finally:
+            os.execv = old
+            market.is_trading_session = old_sess
+
+
+class TestKlineFallback(Base):
+    def test_fallback_and_breaker(self):
+        calls = []
+
+        def bad(*a):
+            calls.append("t")
+            raise OSError("HTTP Error 501: Not Implemented")
+
+        def good(*a):
+            calls.append("e")
+            return [{"t": "2026-11-04", "o": 1, "c": 1, "h": 1, "l": 1, "v": 1}]
+        old = (market._kline_tencent, market._kline_eastmoney)
+        market._kline_tencent, market._kline_eastmoney = bad, good
+        market._down.clear()
+        try:
+            self.assertEqual(len(REAL_GET_KLINE("600900")), 1)
+            self.assertEqual(len(REAL_GET_KLINE("600900")), 1)
+            self.assertEqual(calls, ["t", "e", "e"])   # 腾讯熔断后第二次直接走东财
+        finally:
+            market._kline_tencent, market._kline_eastmoney = old
+            market._down.clear()
+
+
+class TestNewFeatures(Base):
+    def test_backtest(self):
+        from core import backtest
+        import math
+        # 正弦波走势：均线策略应该有若干笔交易
+        kl = []
+        for i in range(400):
+            c = 10 + 2 * math.sin(i / 15.0) + i * 0.002
+            kl.append({"t": "D%04d" % i, "o": c - 0.02, "c": c, "h": c + 0.1, "l": c - 0.1, "v": 10000 + (i % 7) * 500})
+        r = backtest.run("ma_cross", ["000001"], 400, kline_fn=lambda s: kl)
+        x = r["results"][0]
+        self.assertNotIn("error", x)
+        self.assertGreaterEqual(x["trades"], 3)
+        self.assertLessEqual(x["max_drawdown_pct"], 0)
+        self.assertEqual(r["summary"]["symbols"], 1)
+        buys = [t for t in x["trade_log"] if t["side"] == "buy"]
+        self.assertTrue(all(t["shares"] % 100 == 0 for t in buys))
+        with self.assertRaises(ValueError):
+            backtest.run("orderbook", ["000001"], kline_fn=lambda s: kl)
+
+    def test_inbox_journal_report(self):
+        db.run("INSERT INTO alerts(ts,source,symbol,name,type,side,strength,message,price) VALUES(?,?,?,?,?,?,?,?,?)",
+               (time.time(), "rule", "sz000001", "平安", "pct_above", "watch", 1, "大涨", 10))
+        ib = agent.inbox()
+        self.assertEqual(len(ib["new_alerts"]), 1)
+        PRICES["sz000001"] = fake_quote("000001", 10.0)
+        agent.apply_decision({"market_view": "x", "actions": [], "journal": "今天观望，等回调"}, agent="t")
+        self.assertEqual(len(agent.inbox()["new_alerts"]), 0)   # 决策之后 inbox 清空
+        self.assertIn("等回调", agent.journal_recent())
+        self.assertIn("等回调", agent.build_context(with_ticks=False)["journal_recent"])
+        rep = agent.daily_report()
+        self.assertEqual(rep["decisions"], 1)
+
+    def test_wakeup(self):
+        from core import wakeup
+        out = os.path.join(TMP, "woke.txt")
+        config.save_config({"ai": {"wakeup_command": 'echo "$AI_TRIGGER|$AI_SYMBOLS" > "%s"' % out}})
+        self.assertTrue(wakeup.trigger("测试异动", ["sz000001"]))
+        self.assertFalse(wakeup.trigger("冷却中", ["sz000001"]))   # 冷却
+        wakeup._state["proc"].wait(5)
+        with open(out, encoding="utf-8") as f:
+            self.assertEqual(f.read().strip(), "测试异动|sz000001")
+        config.save_config({"ai": {"wakeup_command": ""}})
+
+
+class TestAShare(Base):
+    def _q(self, **kw):
+        q = fake_quote("000001", 11.0, pct=4.0, prev=10.58, vol_ratio=2.6)
+        q.update(open=10.95, high=11.4, low=10.9, amount=11.15 * 3e6, volume=3e6)   # vwap≈11.15
+        q.update(kw)
+        return q
+
+    def test_distribution_detected(self):
+        it = {"news_today": {"count": 2, "pos": 2, "neg": 0},
+              "flow_today": {"main_yi": -1.2, "small_yi": 0.9, "main_last30m_yi": -0.3}}
+        r = news.distribution_check(self._q(), {"chg20d_pct": 32}, it)
+        self.assertIsNotNone(r)
+        self.assertEqual(r[0], "sell")
+        self.assertTrue(any("主力净流出" in x for x in r[2]))
+        self.assertTrue(any("散户接盘" in x for x in r[2]))
+
+    def test_healthy_rally_not_flagged(self):
+        # 利好 + 上涨 + 主力净流入 + 收在均价上方 → 不报出货
+        it = {"news_today": {"count": 1, "pos": 1, "neg": 0}, "flow_today": {"main_yi": 2.0, "small_yi": -0.8}}
+        q = self._q(price=11.38, high=11.4)
+        self.assertIsNone(news.distribution_check(q, {"chg20d_pct": 5}, it))
+
+    def test_washout(self):
+        it = {"news_today": {"count": 1, "pos": 0, "neg": 1}, "flow_today": {"main_yi": 0.6, "small_yi": -0.4}}
+        q = fake_quote("000001", 10.55, pct=-0.3, prev=10.58)
+        q.update(open=10.2, high=10.6, low=10.1, amount=10.4 * 1e6, volume=1e6)
+        r = news.distribution_check(q, {}, it)
+        self.assertEqual(r[0], "watch")
+
+    def test_tags_and_strategy(self):
+        self.assertEqual(news.tag("关于控股股东减持股份的预披露公告")[0], "利空")
+        self.assertEqual(news.tag("公司中标5亿元订单")[0], "利好")
+        from core.engine import StrategyRunner
+        sr = StrategyRunner()
+        it = {"news_today": {"count": 2, "pos": 2, "neg": 0},
+              "flow_today": {"main_yi": -1.2, "small_yi": 0.9, "main_last30m_yi": -0.3}}
+        q = dict(self._q(), intel=it)
+        kl = fake_kline("x", count=120)
+        sigs = [s for s in sr.run("sz000001", q, kl, {"chg20d_pct": 32}, []) if s["strategy"] == "distribution"]
+        self.assertEqual(len(sigs), 1)
+        self.assertEqual(sigs[0]["side"], "sell")
+        self.assertIn("出货", sigs[0]["message"])
+
+    def test_context_has_flash(self):
+        ctx = agent.build_context(with_ticks=False)
+        self.assertEqual(ctx["flash_news"][0], "11-04 10:00 测试快讯")
+
+
+class TestCommitteeAndPlans(Base):
+    OPS = {"stance": "多", "score": 3, "confidence": 0.7, "summary": "s", "points": ["p"]}
+    FINAL = {"stance": "多", "score": 3, "confidence": 0.75, "summary": "可以买", "points": [], "decision": "buy",
+             "position_pct": 0.3, "entry_max": 10.2, "stop_loss": 9.4, "target": 11.5, "trailing_pct": 6,
+             "max_hold_days": 15, "thesis": "放量突破10元平台",
+             "invalidation": [{"type": "price_below", "price": 9.8, "desc": "跌回平台下方"}],
+             "watch_points": ["关注能否站稳10元"]}
+
+    def _external_run(self, final=None, veto=False):
+        from core import committee
+        PRICES["sz000001"] = fake_quote("000001", 10.0)
+        r = committee.start_external("000001")
+        rid = r["run_id"]
+        self.assertTrue(os.path.exists(os.path.join(config.BASE_DIR, r["dossier_file"])) or
+                        os.path.exists(r["dossier"] and committee.get_run(rid)["dossier_path"]))
+        for role in committee.ORDER[:-1]:
+            op = dict(self.OPS)
+            if role == "risk":
+                op.update(veto=veto, veto_reason="测试否决" if veto else "", max_position_pct=0.25)
+            committee.save_opinion(rid, role, op)
+        return rid, committee.finalize(rid, final or dict(self.FINAL))
+
+    def test_roles_file(self):
+        from core import committee
+        roles = committee.load_roles()
+        for r in committee.ORDER + ["_common"]:
+            self.assertIn(r, roles, r)
+        self.assertEqual(len(committee.ORDER), 11)
+
+    def test_gate_blocks_then_allows(self):
+        config.save_config({"committee": {"required_for_buy": True}})
+        PRICES["sz000001"] = fake_quote("000001", 10.0)
+        res = agent.apply_decision({"actions": [{"symbol": "000001", "action": "buy", "position_pct": 0.3,
+                                                 "confidence": 0.9}]})
+        self.assertEqual(res["actions"][0]["status"], "rejected")
+        self.assertIn("投研委员会", res["actions"][0]["error"])
+        rid, fin = self._external_run()
+        self.assertEqual(fin["status"], "approved")
+        self.assertEqual(fin["position_pct"], 0.25)       # 风控官上限压低仓位
+        res = agent.apply_decision({"actions": [{"symbol": "000001", "action": "buy", "position_pct": 0.4,
+                                                 "confidence": 0.9}]})
+        a = res["actions"][0]
+        self.assertEqual(a["status"], "filled", a)
+        self.assertEqual(a["committee_run"], rid)
+        self.assertEqual(a["trade"]["shares"], 200)      # 25% × 10000 / 10.01 → 249 → 200
+        from core import plans
+        p = plans.get_active("paper", "000001")[0]
+        self.assertEqual(p["run_id"], rid)
+        self.assertEqual(p["stop_loss"], 9.4)
+        self.assertEqual(p["watch_points"], ["关注能否站稳10元"])
+
+    def test_veto_and_entry_max(self):
+        config.save_config({"committee": {"required_for_buy": True}})
+        _, fin = self._external_run(veto=True)
+        self.assertEqual(fin["status"], "rejected")
+        self.assertIn("风控官否决", fin["gate_notes"][0])
+        _, fin = self._external_run()
+        PRICES["sz000001"] = fake_quote("000001", 10.6)   # 超过入场上限 10.2
+        res = agent.apply_decision({"actions": [{"symbol": "000001", "action": "buy", "confidence": 0.9}]})
+        self.assertIn("入场上限", res["actions"][0]["error"])
+
+    def test_permission_and_regime(self):
+        PRICES["sz300750"] = fake_quote("300750", 20.0)
+        res = agent.apply_decision({"actions": [{"symbol": "300750", "action": "buy", "confidence": 0.9}]})
+        self.assertIn("无交易权限", res["actions"][0]["error"])
+        REGIME.update(state="冰点", position_cap=0.1)
+        PRICES["sz000001"] = fake_quote("000001", 10.0)
+        res = agent.apply_decision({"actions": [{"symbol": "000001", "action": "buy", "position_pct": 0.3,
+                                                 "confidence": 0.9}]})
+        self.assertEqual(res["actions"][0]["status"], "rejected")   # 冰点10% = 1000元 < 一手
+
+    def test_plan_triggers_and_close(self):
+        from core import plans
+        PRICES["sz000001"] = fake_quote("000001", 10.0)
+        broker.paper_execute("000001", "buy", 300)
+        p = plans.get_active("paper", "000001")[0]
+        self.assertIn("未经投研委员会", p["thesis"])
+        self.assertAlmostEqual(p["stop_loss"], round(10.01 * 0.93, 3))
+        plans.update("paper", "000001", {"invalidation": [{"type": "price_below", "price": 9.8}]})
+        q = fake_quote("000001", 9.7, pct=-3)
+        hits = plans.check_all({"sz000001": q}, {}, None, broker.get_positions())
+        self.assertEqual([h["key"] for h in hits], ["inv0_price_below"])
+        self.assertEqual(plans.check_all({"sz000001": q}, {}, None, broker.get_positions()), [])  # 当天不重复
+        q2 = fake_quote("000001", 9.2, pct=-8)
+        hits = plans.check_all({"sz000001": q2}, {}, None, broker.get_positions())
+        self.assertTrue(any(h["key"] == "stop_loss" and h["auto_sell"] for h in hits))
+        db.run("UPDATE positions SET last_buy_date='2000-01-01'")
+        PRICES["sz000001"] = q2
+        broker.paper_execute("000001", "sell", 300)
+        self.assertEqual(plans.get_active("paper", "000001"), [])
+        closed = db.one("SELECT * FROM plans WHERE symbol='sz000001'")
+        self.assertEqual(closed["status"], "closed")
+        self.assertLess(json.loads(closed["outcome"])["realized_pnl"], 0)
+
+    def test_builtin_pipeline_fake_llm(self):
+        from core import committee, llm
+        seen = []
+
+        def fake_chat(msgs, cfg):
+            sysmsg = msgs[0]["content"]
+            role = next(r for r in committee.ORDER[::-1] if committee.load_roles()[r] in sysmsg)
+            seen.append(role)
+            payload = json.loads(msgs[1]["content"])
+            if role in ("bull", "bear") and payload["round"] == 2:
+                assert payload["debate_so_far"], "第2轮必须看到第1轮辩论"
+            if role == "pm":
+                return json.dumps(self.FINAL, ensure_ascii=False)
+            if role == "risk":
+                return json.dumps(dict(self.OPS, veto=False, max_position_pct=0.3))
+            return json.dumps(self.OPS, ensure_ascii=False)
+        old = (llm.enabled, llm.chat)
+        llm.enabled, llm.chat = (lambda: True), fake_chat
+        try:
+            PRICES["sz000001"] = fake_quote("000001", 10.0)
+            res = committee.run_builtin("000001")
+        finally:
+            llm.enabled, llm.chat = old
+        self.assertEqual(res["status"], "approved")
+        self.assertEqual(sorted(set(seen)), sorted(committee.ORDER))
+        self.assertEqual(len(seen), 13)
+        run = committee.get_run(res["run_id"])
+        self.assertEqual(len(run["opinions"]), 13)
+        self.assertEqual([o["round"] for o in run["opinions"] if o["role"] == "bear"], [1, 2])
+
+    def test_context_has_plans_and_regime(self):
+        PRICES["sz000001"] = fake_quote("000001", 10.0)
+        broker.paper_execute("000001", "buy", 100)
+        ctx = agent.build_context(with_ticks=False)
+        self.assertEqual(ctx["market_regime"]["state"], "强势")
+        self.assertEqual(ctx["position_plans"][0]["symbol"], "sz000001")
+        self.assertEqual(ctx["positions_without_plan"], [])
+
+
+def tearDownModule():
+    shutil.rmtree(TMP, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    unittest.main()

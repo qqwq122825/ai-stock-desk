@@ -1,0 +1,376 @@
+"""选股漏斗 + 大盘情绪择时（波段 1~4 周风格）。
+
+漏斗：
+  全A快照(东财, ~5900只) + 场内ETF
+   → 硬过滤：交易权限板块 / ST / 停牌 / 次新 / 成交额 / 一手买得起（≤单票仓位上限）
+   → 快照预打分取前 kline_candidates 只
+   → 拉日K细算波段分：趋势、位置、动量、量能、板块强度、波动、追高惩罚
+   → 前 40 只再查近5日主力资金 + 近7日公告（减持/问询等扣分）
+   → Top N 候选池（写入 candidates 表），收盘复盘时送投研委员会审核前几名
+
+大盘状态（regime）：上涨家数占比、涨停/跌停家数、两市成交额、沪深300 相对 MA20/MA60
+  → 强势 / 震荡 / 弱势 / 冰点，对应不同总仓位上限（config.regime.caps）
+"""
+import json
+import logging
+import statistics
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+from . import broker, db, indicators, market, news
+from .config import load_config
+
+log = logging.getLogger("screener")
+
+CLIST = ("https://push2.eastmoney.com/api/qt/clist/get?pn=%d&pz=100&po=1&np=1&fltt=2&invt=2&fid=%s&fs=%s"
+         "&fields=f2,f3,f5,f6,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f23,f26,f62,f100,f184")
+FS_STOCK = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
+FS_ETF = "b:MK0021,b:MK0022,b:MK0023,b:MK0024"
+FS_SECTOR = "m:90+t:2"
+
+_cache = {}
+_lock = threading.Lock()
+
+
+def _num(x, default=0.0):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return default
+
+
+def _clist(fs, fid="f6", max_pages=80, workers=6):
+    first = json.loads(market._http_get(CLIST % (1, fid, fs), timeout=10))["data"]
+    rows = list(first["diff"])
+    pages = min(max_pages, (first["total"] + 99) // 100)
+    if pages > 1:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for d in ex.map(lambda p: json.loads(market._http_get(CLIST % (p, fid, fs), timeout=10)).get("data"),
+                            range(2, pages + 1)):
+                if d:
+                    rows.extend(d["diff"])
+    return rows
+
+
+def _norm(r, is_etf=False):
+    code = str(r.get("f12"))
+    if len(code) != 6 or not code.isdigit():
+        return None
+    if r.get("f13") == 1:
+        sym = "sh" + code
+    else:
+        sym = ("bj" if code.startswith(("8", "4", "92")) else "sz") + code
+    return {"symbol": sym, "name": r.get("f14", ""), "price": _num(r.get("f2")), "pct": _num(r.get("f3")),
+            "amount": _num(r.get("f6")), "turnover": _num(r.get("f8")), "pe": _num(r.get("f9")),
+            "vol_ratio": _num(r.get("f10")), "high": _num(r.get("f15")), "low": _num(r.get("f16")),
+            "open": _num(r.get("f17")), "prev_close": _num(r.get("f18")), "total_mv": _num(r.get("f20")),
+            "pb": _num(r.get("f23")), "list_date": str(r.get("f26") or ""), "main_net": _num(r.get("f62")),
+            "main_pct": _num(r.get("f184")), "industry": r.get("f100") or ("ETF" if is_etf else ""),
+            "board": "etf" if is_etf else market.board(sym)}
+
+
+def snapshot_all(ttl=60):
+    """全A股 + ETF 快照（缓存 ttl 秒）。"""
+    with _lock:
+        hit = _cache.get("all")
+        if hit and time.time() - hit[0] < ttl:
+            return hit[1]
+    stocks = [x for x in (_norm(r) for r in _clist(FS_STOCK)) if x]
+    etfs = [x for x in (_norm(r, True) for r in _clist(FS_ETF, max_pages=4)) if x]
+    val = {"stocks": stocks, "etfs": etfs}
+    with _lock:
+        _cache["all"] = (time.time(), val)
+    return val
+
+
+def sectors(ttl=120):
+    with _lock:
+        hit = _cache.get("sec")
+        if hit and time.time() - hit[0] < ttl:
+            return hit[1]
+    rows = _clist(FS_SECTOR, fid="f3", max_pages=5)
+    out = {}
+    n = len(rows)
+    for i, r in enumerate(sorted(rows, key=lambda x: -_num(x.get("f3")))):
+        out[r.get("f14")] = {"pct": _num(r.get("f3")), "main_net_yi": round(_num(r.get("f62")) / 1e8, 2),
+                             "rank": i + 1, "rank_pct": round((i + 1) / n * 100, 1)}
+    with _lock:
+        _cache["sec"] = (time.time(), out)
+    return out
+
+
+def market_regime(ttl=120):
+    """大盘情绪状态。"""
+    with _lock:
+        hit = _cache.get("regime")
+        if hit and time.time() - hit[0] < ttl:
+            return hit[1]
+    snap = snapshot_all()["stocks"]
+    live = [s for s in snap if s["price"] > 0]
+    up = sum(1 for s in live if s["pct"] > 0)
+    down = sum(1 for s in live if s["pct"] < 0)
+    lu = sum(1 for s in live if s["pct"] >= market.limit_pct(s["symbol"], s["name"]) - 0.25)
+    ld = sum(1 for s in live if s["pct"] <= -market.limit_pct(s["symbol"], s["name"]) + 0.25)
+    amount = sum(s["amount"] for s in live) / 1e8
+    med = statistics.median([s["pct"] for s in live]) if live else 0
+    idx = {}
+    try:
+        kl = market.get_kline("sh000300", "day", 80)
+        c = [b["c"] for b in kl]
+        idx = {"hs300": c[-1], "ma20": round(indicators.sma(c, 20), 2), "ma60": round(indicators.sma(c, 60), 2),
+               "chg5d_pct": round((c[-1] / c[-6] - 1) * 100, 2)}
+    except Exception as e:
+        log.warning("指数K线失败: %s", e)
+    score, why = 0.0, []
+    ur = up / max(1, up + down)
+    if ur >= 0.6:
+        score += 1; why.append("上涨家数占比%.0f%%" % (ur * 100))
+    elif ur <= 0.35:
+        score -= 1; why.append("下跌家数占比%.0f%%" % ((1 - ur) * 100))
+    if lu >= 80:
+        score += 1; why.append("涨停%d家" % lu)
+    if ld >= 50:
+        score -= 2; why.append("跌停%d家" % ld)
+    elif ld >= 20:
+        score -= 1; why.append("跌停%d家" % ld)
+    if idx:
+        if idx["hs300"] > idx["ma20"]:
+            score += 1; why.append("沪深300站上MA20")
+        else:
+            score -= 1; why.append("沪深300跌破MA20")
+        if idx["ma20"] > idx["ma60"]:
+            score += 0.5
+        else:
+            score -= 0.5; why.append("MA20<MA60 中期走弱")
+    if not idx:
+        why.append("沪深300数据缺失（未计入，结论偏乐观）")
+    glob = None
+    try:
+        from . import global_market
+        d, reason = global_market.regime_adjust()
+        if reason:
+            score += d; why.append(reason)
+        ov = global_market.overnight()
+        glob = ov["summary"] if ov else None
+    except Exception as e:
+        log.warning("外盘修正失败: %s", e)
+    if amount >= 15000:
+        score += 0.5; why.append("成交额%.0f亿 活跃" % amount)
+    elif amount < 8000:
+        score -= 0.5; why.append("成交额%.0f亿 缩量" % amount)
+    state = "强势" if score >= 2 else "震荡" if score >= 0 else "弱势" if score >= -2 else "冰点"
+    cap = load_config()["regime"]["caps"].get(state, 0.6)
+    val = {"state": state, "score": score, "position_cap": cap, "reasons": why, "up": up, "down": down,
+           "limit_up": lu, "limit_down": ld, "amount_yi": round(amount), "median_pct": round(med, 2),
+           "index": idx, "global": glob, "as_of": market.now().strftime("%m-%d %H:%M")}
+    with _lock:
+        _cache["regime"] = (time.time(), val)
+    return val
+
+
+# ---------------- 打分 ----------------
+def hard_filter(items, cfg, max_lot_value):
+    u = cfg["universe"]
+    today = market.now().strftime("%Y%m%d")
+    out, dropped = [], {}
+
+    def drop(k):
+        dropped[k] = dropped.get(k, 0) + 1
+    for s in items:
+        if s["board"] not in u["boards"]:
+            drop("无交易权限"); continue
+        if s["price"] <= 0:
+            drop("停牌"); continue
+        if u["exclude_st"] and ("ST" in s["name"].upper() or "退" in s["name"]):
+            drop("ST/退市"); continue
+        if s["price"] < u["min_price"]:
+            drop("低价股"); continue
+        min_amt = u["etf_min_amount_yi"] if s["board"] == "etf" else u["min_amount_yi"]
+        if s["amount"] < min_amt * 1e8:
+            drop("成交额不足"); continue
+        if s["board"] != "etf" and s["list_date"][:8].isdigit():
+            days = (market.datetime.strptime(today, "%Y%m%d") - market.datetime.strptime(s["list_date"][:8], "%Y%m%d")).days
+            if days < u["min_list_days"]:
+                drop("次新股"); continue
+        if s["price"] * market.lot_rule(s["symbol"])[0] > max_lot_value:
+            drop("一手超出单票上限"); continue
+        out.append(s)
+    return out, dropped
+
+
+def pre_score(s, sec):
+    """仅用快照的粗分，用于决定拉哪些日K。"""
+    sc = 0.0
+    if 0 < s["pct"] < 6:
+        sc += 1
+    if 1.0 <= s["vol_ratio"] <= 3:
+        sc += 0.5
+    if s["main_pct"] > 0:
+        sc += 0.5
+    r = (sec.get(s["industry"]) or {}).get("rank_pct")
+    if r is not None and r <= 30:
+        sc += 0.5
+    return sc + min(s["amount"] / 1e9, 1.0) * 0.5
+
+
+def swing_score(s, kl, sec):
+    """波段打分。返回 (score, reasons, metrics)。"""
+    c = [b["c"] for b in kl]
+    v = [b["v"] for b in kl]
+    if len(c) < 70:
+        return None
+    sc, why = 0.0, []
+    ma20, ma60 = indicators.sma(c, 20), indicators.sma(c, 60)
+    ma20_prev = indicators.sma(c[:-5], 20)
+    if c[-1] > ma20:
+        sc += 1; why.append("站上MA20")
+    if ma20 > ma60:
+        sc += 1; why.append("MA20>MA60")
+    if ma20 > ma20_prev:
+        sc += 0.5; why.append("MA20向上")
+    chg20 = (c[-1] / c[-21] - 1) * 100
+    hi60 = max(b["h"] for b in kl[-60:])
+    if 3 <= chg20 <= 30:
+        sc += 1; why.append("20日涨%.0f%%(健康)" % chg20)
+    elif chg20 > 40:
+        sc -= 2; why.append("20日涨%.0f%%(过热)" % chg20)
+    if c[-1] >= hi60 * 0.92:
+        sc += 0.5; why.append("接近60日高点")
+    elif c[-1] < hi60 * 0.75:
+        sc -= 1; why.append("距60日高点回撤>25%")
+    m = indicators.macd(c)
+    if m:
+        if m["dif"] > m["dea"]:
+            sc += 0.5; why.append("MACD多头")
+        if m["dif"] > 0:
+            sc += 0.5
+    r = indicators.rsi(c, 14)
+    if r is not None:
+        if 50 <= r <= 70:
+            sc += 1; why.append("RSI%.0f" % r)
+        elif r > 78:
+            sc -= 1; why.append("RSI%.0f过热" % r)
+    vr = (sum(v[-5:]) / 5) / (sum(v[-20:]) / 20) if sum(v[-20:]) else 1
+    if 1.1 <= vr <= 2.5:
+        sc += 1; why.append("温和放量x%.1f" % vr)
+    elif vr > 3.5:
+        sc -= 0.5; why.append("异常放量x%.1f" % vr)
+    rets = [c[i] / c[i - 1] - 1 for i in range(len(c) - 20, len(c))]
+    vol = statistics.pstdev(rets) * 100
+    if vol > 5:
+        sc -= 0.5; why.append("波动大%.1f%%" % vol)
+    if s["pct"] >= 7:
+        sc -= 1; why.append("今日涨%.1f%%不追" % s["pct"])
+    prev = s["prev_close"] or c[-2]
+    if prev and (s["high"] - s["price"]) / prev * 100 >= 4:
+        sc -= 0.5; why.append("长上影")
+    if s["main_pct"] > 3:
+        sc += 0.5; why.append("今日主力净占比%.1f%%" % s["main_pct"])
+    sr = sec.get(s["industry"])
+    if sr:
+        if sr["rank_pct"] <= 20:
+            sc += 1; why.append("板块强(%s 前%.0f%%)" % (s["industry"], sr["rank_pct"]))
+        elif sr["rank_pct"] >= 80:
+            sc -= 0.5; why.append("板块弱")
+    metrics = {"ma20": round(ma20, 3), "ma60": round(ma60, 3), "chg20d": round(chg20, 2), "rsi14": r and round(r, 1),
+               "vol5_20": round(vr, 2), "volatility20": round(vol, 2), "hi60": hi60}
+    return sc, why, metrics
+
+
+def run(save=True, top_n=None, progress=None):
+    cfg = load_config()
+    db.init_db()
+    _ensure_schema()
+    t0 = time.time()
+    snap = snapshot_all(ttl=30)
+    sec = sectors()
+    regime = market_regime()
+    equity = max(broker.snapshot("paper")["equity"], 1)
+    max_lot_value = equity * cfg["risk"]["max_position_pct"]
+    universe = snap["stocks"] + snap["etfs"]
+    passed, dropped = hard_filter(universe, cfg, max_lot_value)
+    passed.sort(key=lambda s: -pre_score(s, sec))
+    pool = passed[:cfg["screener"]["kline_candidates"]]
+    if progress:
+        progress("初筛 %d → %d，拉日K %d 只" % (len(universe), len(passed), len(pool)))
+
+    def k(s):
+        try:
+            return s, market.get_kline(s["symbol"], "day", 130)
+        except Exception:
+            return s, None
+    scored = []
+    with ThreadPoolExecutor(max_workers=4) as ex:   # 免费接口，别并发太猛
+        for s, kl in ex.map(k, pool):
+            if not kl:
+                continue
+            r = swing_score(s, kl, sec)
+            if r:
+                scored.append(dict(s, score=r[0], reasons=r[1], metrics=r[2]))
+    scored.sort(key=lambda x: -x["score"])
+    # 前40只补充资金流 + 公告风险
+    deep = scored[:40]
+
+    def enrich(x):
+        if x["board"] == "etf":
+            return x
+        try:
+            d = news.money_flow_daily(x["symbol"], 5)
+            m5 = sum(r["main"] for r in d) / 1e8
+            x["metrics"]["main_5d_yi"] = round(m5, 2)
+            if m5 > 0:
+                x["score"] += 1; x["reasons"].append("5日主力净流入%.2f亿" % m5)
+            elif m5 < -abs(x["amount"]) / 1e8 * 0.3:
+                x["score"] -= 1; x["reasons"].append("5日主力净流出%.2f亿" % m5)
+        except Exception:
+            pass
+        try:
+            neg = [a for a in news.announcements(x["symbol"], 8) if a["tag"] == "利空"
+                   and a["time"] >= (market.now() - market.timedelta(days=7)).strftime("%Y-%m-%d")]
+            if neg:
+                x["score"] -= 1.5; x["reasons"].append("近7日利空公告：" + neg[0]["title"][:30])
+        except Exception:
+            pass
+        return x
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        deep = list(ex.map(enrich, deep))
+    deep.sort(key=lambda x: -x["score"])
+    top = deep[:top_n or cfg["screener"]["top_n"]]
+    if pool and len(scored) < len(pool) * 0.5:
+        log.warning("日K获取成功率低：%d/%d", len(scored), len(pool))
+    stats = {"universe": len(universe), "passed": len(passed), "klined": len(scored), "kline_requested": len(pool),
+             "dropped": dropped,
+             "seconds": round(time.time() - t0, 1), "max_lot_value": round(max_lot_value)}
+    sid = None
+    if save:
+        sid = db.run("INSERT INTO screens(ts,regime,stats) VALUES(?,?,?)",
+                     (time.time(), json.dumps(regime, ensure_ascii=False), json.dumps(stats, ensure_ascii=False)))
+        with db.tx() as c:
+            for i, x in enumerate(top):
+                c.execute("INSERT INTO candidates VALUES(?,?,?,?,?,?,?,?,?,?)",
+                          (sid, i + 1, x["symbol"], x["name"], x["board"], x["industry"], round(x["score"], 2),
+                           x["price"], x["pct"], json.dumps({"reasons": x["reasons"], "metrics": x["metrics"]},
+                                                            ensure_ascii=False)))
+    return {"screen_id": sid, "regime": regime, "stats": stats,
+            "candidates": [{"rank": i + 1, "symbol": x["symbol"], "name": x["name"], "board": x["board"],
+                            "industry": x["industry"], "score": round(x["score"], 2), "price": x["price"],
+                            "pct": x["pct"], "reasons": x["reasons"], "metrics": x["metrics"]}
+                           for i, x in enumerate(top)]}
+
+
+def _ensure_schema():
+    db.init_db()
+
+
+def latest_candidates(limit=20):
+    _ensure_schema()
+    s = db.one("SELECT * FROM screens ORDER BY id DESC LIMIT 1")
+    if not s:
+        return None
+    rows = db.all("SELECT * FROM candidates WHERE screen_id=? ORDER BY rank LIMIT ?", (s["id"], limit))
+    for r in rows:
+        d = db.jloads(r.pop("details"), {})
+        r.update(d)
+    return {"screen_id": s["id"], "ts": market.datetime.fromtimestamp(s["ts"], market.CN_TZ).strftime("%m-%d %H:%M"),
+            "regime": db.jloads(s["regime"], {}), "stats": db.jloads(s["stats"], {}), "candidates": rows}
