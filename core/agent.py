@@ -412,7 +412,7 @@ def size_and_check(acct, act, q, snap, cfg, watch_syms, regime_cap=None, cap_pct
         raise OrderError("风控：只允许买入自选股")
     from .config import style as _style
     mom = _style(acct, cfg) == "momentum"
-    chase = cfg["momentum"]["max_chase_pct"] if mom else risk["max_chase_pct"]
+    chase = min(cfg["momentum"]["max_chase_pct"], risk["max_chase_pct"]) if mom else risk["max_chase_pct"]
     if q["pct"] >= chase:
         raise OrderError("风控：当日已涨 %.2f%%，超过追高上限 %.1f%%" % (q["pct"], chase))
     if snap["day_pnl_pct"] is not None and snap["day_pnl_pct"] / 100 <= risk["daily_loss_limit_pct"]:

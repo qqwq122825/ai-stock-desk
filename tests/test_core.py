@@ -947,6 +947,12 @@ class TestMomentum(Base):
         set_pools(n_zt=120, n_zb=20, yzt_pct=5, max_lb=7)
         self.assertEqual(emotion.sentiment(date="20991228")["stage"], "高潮")
 
+    def test_cap_never_looser_than_regime(self):
+        REGIME.update(state="弱势", position_cap=0.2)              # 情绪「修复」50%，大盘弱势 20% → 取 20%
+        self.assertEqual(screener.position_cap("paper")["cap"], 0.2)
+        REGIME.update(state="强势", position_cap=0.9)              # 大盘强势 90%，情绪修复 50% → 取 50%
+        self.assertEqual(screener.position_cap("paper")["cap"], 0.5)
+
     def test_style_per_account(self):
         self.assertEqual(config.style("paper"), "momentum")
         self.assertEqual(config.style("live"), "swing")
@@ -962,7 +968,13 @@ class TestMomentum(Base):
         self.assertEqual(p["max_hold_days"], 3)
 
     def test_chase_limit_and_emotion_cap(self):
-        PRICES["sz000001"] = fake_quote("000001", 10.6, pct=6)    # 波段 5% 不追；短线允许到 8%
+        PRICES["sz000003"] = fake_quote("000003", 10.6, pct=6)    # 风控只收紧：短线追高上限不超过 risk.max_chase_pct(5%)
+        res = agent.apply_decision({"actions": [{"symbol": "000003", "action": "buy", "confidence": 0.9}]})
+        self.assertIn("追高上限 5.0%", res["actions"][0]["error"])
+        config.save_config({"momentum": {"max_chase_pct": 8}})     # 短线参数调大也放不宽
+        res = agent.apply_decision({"actions": [{"symbol": "000003", "action": "buy", "confidence": 0.9}]})
+        self.assertIn("追高上限 5.0%", res["actions"][0]["error"])
+        PRICES["sz000001"] = fake_quote("000001", 10.4, pct=4)
         res = agent.apply_decision({"actions": [{"symbol": "000001", "action": "buy", "confidence": 0.9}]})
         self.assertEqual(res["actions"][0]["status"], "filled", res)
         set_pools(n_zt=20)                                          # 冰点 → 情绪仓位 0
@@ -1023,7 +1035,7 @@ class TestMomentum(Base):
         self.assertEqual(plans.check_all({"sz000001": q}, {}, None, broker.get_positions()), [])
 
     def test_momentum_score(self):
-        s = {"symbol": "sz000001", "name": "x", "board": "main", "industry": "光伏设备", "pct": 5, "vol_ratio": 2.5,
+        s = {"symbol": "sz000001", "name": "x", "board": "main", "industry": "光伏设备", "pct": 4.5, "vol_ratio": 2.5,
              "main_pct": 6, "prev_close": 10, "high": 10.55, "price": 10.5, "turnover": 8, "total_mv": 1e10,
              "amount": 5e8}
         hot = {"光伏设备": 1}
@@ -1031,6 +1043,7 @@ class TestMomentum(Base):
         self.assertIsNotNone(screener.momentum_pre(s, {}, hot, mc))
         self.assertIsNone(screener.momentum_pre(dict(s, industry="银行"), {}, hot, mc))   # 不在热门题材
         self.assertIsNone(screener.momentum_pre(dict(s, pct=9.8), {}, hot, mc))          # 快涨停不追
+        self.assertIsNone(screener.momentum_pre(dict(s, pct=6), {}, hot, mc))            # 超过风控追高上限 5%
         sc, why, m = screener.momentum_score(s, fake_kline("sz000001"), {}, hot, mc)
         self.assertGreater(sc, 5)
         self.assertTrue(any("热门题材第1" in w for w in why))

@@ -134,7 +134,7 @@ DEFAULTS = {
         "news_take_profit_pct": 3,      # 有利好消息且高开 ≥3% → 利好兑现，冲高就卖（真假不重要，卖得快）
         "theme_exit": True,             # 所在题材掉出热门题材前列且板块转跌 → 走
         "theme_top": 8,                 # 只做前 8 名热门题材
-        "max_chase_pct": 8,             # 情绪短线允许买已涨 3~8% 的强势股，但不追涨停
+        "max_chase_pct": 5,             # 情绪短线的追高上限；实际取它和 risk.max_chase_pct 中更小的（风控只收紧不放宽）
         "min_pct": 2,                   # 当日涨幅低于 2% 不算强势
     },
     # 策略开关/参数覆盖：{"macd": {"enabled": true, "params": {...}, "cooldown_min": 240}}

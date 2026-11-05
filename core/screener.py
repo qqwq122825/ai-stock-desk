@@ -10,8 +10,8 @@
 
 情绪短线（style=momentum 的账户，见 core/emotion.py）：
    → 只在热门题材（涨停最多的行业）和最强板块里选
-   → 今天涨 2%~8%、没封死涨停、放量、主力流入、收在高位、没在高位连续暴涨的
-   → 总仓位上限 = 情绪周期上限（冰点 0 / 退潮 20% / 修复 50% / 升温 80% / 高潮 50%）
+   → 今天涨 2%~5%（追高上限和风控一致）、没封死涨停、放量、主力流入、收在高位、没在高位连续暴涨的
+   → 总仓位上限 = min(大盘状态上限, 情绪周期上限)（情绪：冰点 0 / 退潮 20% / 修复 50% / 升温 80% / 高潮 50%）
 
 大盘状态（regime）：上涨家数占比、涨停/跌停家数、两市成交额、沪深300 相对 MA20/MA60
   → 强势 / 震荡 / 弱势 / 冰点，对应不同总仓位上限（config.regime.caps）
@@ -292,7 +292,8 @@ def momentum_pre(s, sec, hot, mc):
     if rank is None and (sr is None or sr > 15):
         return None
     lim = market.limit_pct(s["symbol"], s["name"])
-    if not (mc["min_pct"] <= s["pct"] < min(mc["max_chase_pct"], lim - 0.3)):
+    chase = min(mc["max_chase_pct"], load_config()["risk"]["max_chase_pct"])     # 和下单风控一致，选了也买不了的不选
+    if not (mc["min_pct"] <= s["pct"] < min(chase, lim - 0.3)):
         return None
     sc = (3 - min(rank, 10) * 0.2) if rank else 1
     sc += min(s["vol_ratio"], 4) * 0.3 + (0.5 if s["main_pct"] > 0 else 0) + min(s["amount"] / 1e9, 2) * 0.3
@@ -316,6 +317,8 @@ def momentum_score(s, kl, sec, hot, mc):
         sc += 1; why.append("今日涨%.1f%%（强势未封板）" % s["pct"])
     elif s["pct"] > 7:
         sc += 0.5; why.append("今日涨%.1f%%（接近涨停，次日分歧风险大）" % s["pct"])
+    elif s["pct"] >= 2:
+        sc += 0.5; why.append("今日涨%.1f%%" % s["pct"])
     if 1.5 <= s["vol_ratio"] <= 5:
         sc += 1; why.append("量比%.1f" % s["vol_ratio"])
     elif s["vol_ratio"] > 8:
@@ -355,7 +358,7 @@ def momentum_score(s, kl, sec, hot, mc):
 def position_cap(account="paper"):
     """该账户新开仓的总仓位上限。
     波段：看大盘状态（config.regime.caps）。
-    情绪短线：看情绪周期（emotion.STAGE_CAPS）；大盘冰点时也是 0。"""
+    情绪短线：大盘状态上限和情绪周期上限（emotion.STAGE_CAPS）取更小的——只会比波段更严，不会更松。"""
     reg = market_regime()
     out = {"style": account_style(account), "regime": reg["state"], "cap": reg["position_cap"]}
     if out["style"] == "momentum":
@@ -365,7 +368,7 @@ def position_cap(account="paper"):
             out["emotion_error"] = emo["error"]          # 情绪数据拿不到时退回按大盘
         else:
             out["emotion"] = emo["stage"]
-            out["cap"] = 0.0 if reg["state"] == "冰点" else emo["position_cap"]
+            out["cap"] = min(reg["position_cap"], emo["position_cap"])     # 只收紧：取大盘和情绪中更小的
     return out
 
 
@@ -467,7 +470,7 @@ def _run(save=True, top_n=None, progress=None, account="paper"):
             regime["emotion_error"] = emo["error"]
         else:
             regime["emotion"] = emo
-            regime["position_cap"] = 0.0 if regime["state"] == "冰点" else emo["position_cap"]
+            regime["position_cap"] = min(regime["position_cap"], emo["position_cap"])
             hot = {t["name"]: t["rank"] for t in emo["themes"] if t["rank"] <= mc["theme_top"]}
 
     max_lot_value = equity * cfg["risk"]["max_position_pct"]
