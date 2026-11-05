@@ -14,6 +14,7 @@
 
   选股 / 大盘：
   python3 agent_cli.py regime                # 大盘情绪状态 + 总仓位上限
+  python3 agent_cli.py emotion               # 情绪周期（冰点/退潮/修复/升温/高潮）+ 热门题材（情绪短线用）
   python3 agent_cli.py screen                # 全市场选股漏斗 → Top20 候选池（约10~20秒）
   python3 agent_cli.py candidates            # 最近一次候选池
   python3 agent_cli.py daily-close           # 每日收盘流程：选股→委员会审前N只→通过的加自选→推送总结（程序15:05会自动跑）
@@ -109,6 +110,7 @@ def main():
     p = sub.add_parser("request-restart")
     p.add_argument("reason")
     sub.add_parser("regime")
+    sub.add_parser("emotion")
     p = sub.add_parser("global")
     p.add_argument("symbols", nargs="*")
     p = sub.add_parser("screen")
@@ -247,6 +249,9 @@ def main():
     elif a.cmd == "regime":
         from core import screener
         out(screener.market_regime())
+    elif a.cmd == "emotion":
+        from core import emotion
+        out(emotion.sentiment())
     elif a.cmd == "screen":
         from core import screener
         out(screener.run(top_n=a.top, progress=lambda m: print(m, file=sys.stderr), account=a.account))

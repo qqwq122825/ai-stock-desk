@@ -1,4 +1,5 @@
-"""后台登录。密码只从 AI_STOCK_PASSWORD 读取；未配置时不允许登录。"""
+"""后台登录。密码从环境变量 AI_STOCK_PASSWORD 读取，没有就读 data/config.json 的 server.password；都没配置时不允许登录。
+（data/ 不进 git，所以密码不会被推到公开仓库。）"""
 import hashlib
 import hmac
 import os
@@ -8,7 +9,18 @@ from http.cookies import SimpleCookie
 
 from .config import DATA_DIR
 
-PASSWORD = os.environ.get("AI_STOCK_PASSWORD", "")
+def _password():
+    p = os.environ.get("AI_STOCK_PASSWORD")
+    if p:
+        return p
+    try:
+        from .config import load_config
+        return str(load_config()["server"].get("password") or "")
+    except Exception:
+        return ""
+
+
+PASSWORD = _password()
 
 COOKIE = "aistock_sid"
 MAX_AGE = 30 * 86400

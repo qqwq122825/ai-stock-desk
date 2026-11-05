@@ -75,6 +75,18 @@ def build_dossier(sym, account="paper", intent="open"):
             sector = dict(secs[ind], name=ind)
     except Exception:
         pass
+    from .config import style as account_style
+    st = account_style(account)
+    emo = None
+    if st == "momentum":
+        try:
+            from . import emotion
+            e = emotion.sentiment()
+            emo = {k: e.get(k) for k in ("stage", "position_cap", "tip", "reasons", "error")}
+            emo["themes_top5"] = [{"name": t["name"], "zt": t["zt"], "max_lb": t["max_lb"]} for t in (e.get("themes") or [])[:5]]
+            emo["this_stock"] = emotion.theme_of(sym, fund.get("industry"))
+        except Exception as ex:
+            emo = {"error": str(ex)}
     snap = broker.snapshot(account)
     cand = None
     try:
@@ -103,6 +115,7 @@ def build_dossier(sym, account="paper", intent="open"):
         "intel": it,
         "a_share_pattern": {"type": "疑似借利好出货" if chk[0] == "sell" else "疑似利空洗盘", "score": chk[1],
                             "reasons": chk[2]} if chk else None,
+        "trading_style": st, "emotion": emo,
         "fundamentals": fund, "sector": sector, "market_regime": regime, "global_overnight": glob,
         "screener": cand,
         "account": {"account": account, "equity": snap["equity"], "cash": snap["cash"],
@@ -322,7 +335,7 @@ def run_builtin(sym, account="paper", intent="open", trigger="manual", progress=
 def _core(d):
     """给后面角色的精简档案（避免上下文过长）。"""
     return {k: d.get(k) for k in ("symbol", "name", "board", "intent", "as_of", "quote", "daily", "a_share_pattern",
-                                  "sector", "lot", "one_lot_cost")} | {
+                                  "sector", "lot", "one_lot_cost", "trading_style", "emotion")} | {
         "market_state": (d.get("market_regime") or {}).get("state"),
         "overnight_link": (d.get("global_overnight") or {}).get("this_stock"),
         "flow": (d.get("intel") or {}).get("flow_today"), "main_5d_yi": (d.get("intel") or {}).get("main_5d_yi"),

@@ -52,44 +52,66 @@ def _close_one(account, progress=None):
     regime = res["regime"]
     summary = {"screen_id": res["screen_id"], "regime": regime.get("state"), "candidates": len(cands),
                "reviewed": [], "approved": [], "rejected": [], "errors": []}
-    n = cfg["screener"].get("committee_top", 3)
+    n = cfg["screener"].get("committee_top", 10)
+    emo = regime.get("emotion") or {}
+    cold = "情绪%s" % emo["stage"] if emo.get("stage") else "大盘冰点"
     if regime.get("position_cap", 1) <= 0:
-        say("大盘冰点，不开新仓，跳过委员会")
+        say("%s，不开新仓，跳过委员会" % cold)
         n = 0
     if not llm.enabled():
         say("内置大模型未启用，只选股不开委员会")
         n = 0
     held = {p["symbol"] for p in broker.get_positions(account)}
-    picked = []
+    picked, skipped = [], []
+    min_score = cfg["screener"].get("committee_min_score", 0.5)
     for c in cands:
         if len(picked) >= n:
             break
+        if c["score"] < min_score:
+            skipped.append("%s(分太低)" % c["name"]); continue
         if c["symbol"] in held or committee.approved_run(c["symbol"], account):
             continue
+        if db.one("SELECT 1 FROM committee_runs WHERE symbol=? AND COALESCE(account,'paper')=? AND ts>? "
+                  "AND status IN ('approved','rejected')", (c["symbol"], account, time.time() - 20 * 3600)):
+            skipped.append("%s(今天审过)" % c["name"]); continue
         picked.append(c)
-    for c in picked:
+    summary["skipped"] = skipped
+
+    def review(c):
         say("委员会审核 %s %s（选股第%d名 %.1f分）…" % (c["name"], c["symbol"], c["rank"], c["score"]))
-        try:
-            r = committee.run_builtin(c["symbol"], account, "open", trigger="每日收盘自动")
-            item = {"symbol": c["symbol"], "name": c["name"], "run_id": r["run_id"], "decision": r.get("decision"),
-                    "summary": r.get("summary", "")[:120]}
-            summary["reviewed"].append(item)
-            if r["status"] == "approved":
-                summary["approved"].append(item)
-                note = an + "委员会#%d通过：入场≤%s 止损%s 目标%s" % (r["run_id"], r.get("entry_max"), r.get("stop_loss"),
-                                                      r.get("target"))
-                db.run("INSERT OR REPLACE INTO watchlist VALUES(?,?,?,?,?)",
-                       (c["symbol"], c["name"], note, "daily-close", time.time()))
-            else:
-                summary["rejected"].append(dict(item, why="；".join(r.get("gate_notes", [])) or r.get("summary", "")[:80]))
-        except Exception as e:
-            log.exception("委员会失败 %s", c["symbol"])
-            summary["errors"].append("%s: %s" % (c["symbol"], e))
+        return c, committee.run_builtin(c["symbol"], account, "open", trigger="每日收盘自动")
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    par = max(1, int(cfg["screener"].get("committee_parallel", 3)))
+    with ThreadPoolExecutor(max_workers=par) as ex:
+        futs = {ex.submit(review, c): c for c in picked}
+        for fu in as_completed(futs):
+            c = futs[fu]
+            try:
+                _, r = fu.result()
+                item = {"symbol": c["symbol"], "name": c["name"], "rank": c["rank"], "run_id": r["run_id"],
+                        "decision": r.get("decision"), "summary": r.get("summary", "")[:120]}
+                summary["reviewed"].append(item)
+                if r["status"] == "approved":
+                    summary["approved"].append(item)
+                    note = an + "委员会#%d通过：入场≤%s 止损%s 目标%s" % (r["run_id"], r.get("entry_max"),
+                                                          r.get("stop_loss"), r.get("target"))
+                    db.run("INSERT OR REPLACE INTO watchlist VALUES(?,?,?,?,?)",
+                           (c["symbol"], c["name"], note, "daily-close", time.time()))
+                else:
+                    summary["rejected"].append(dict(item, why="；".join(r.get("gate_notes", []))
+                                                    or r.get("summary", "")[:80]))
+            except Exception as e:
+                log.exception("委员会失败 %s", c["symbol"])
+                summary["errors"].append("%s: %s" % (c["symbol"], e))
+    for k in ("reviewed", "approved", "rejected"):
+        summary[k].sort(key=lambda x: x.get("rank", 99))
     summary["seconds"] = round(time.time() - t0)
 
     # 推送 + 交易日志
     snap = broker.snapshot(account)
-    lines = ["**大盘：%s**（新开仓总仓位上限 %d%%）  " % (regime.get("state"), int(regime.get("position_cap", 0) * 100)),
+    lines = ["**大盘：%s**%s（新开仓总仓位上限 %d%%）  " % (
+        regime.get("state"), "，情绪：%s（%s）" % (emo["stage"], "，".join(emo.get("reasons", [])[:2])) if emo else "",
+        int(regime.get("position_cap", 0) * 100)),
              an + "：总资产 %.2f，今日 %s%%，持仓 %d 只" % (snap["equity"], snap["day_pnl_pct"], len(snap["positions"])), ""]
     if summary["approved"]:
         lines.append("✅ **委员会通过（%s）：**" % ("明天价格合适会自动买入" if account == "paper" else "AI 会生成建议单等你确认"))
@@ -97,8 +119,10 @@ def _close_one(account, progress=None):
     if summary["rejected"]:
         lines.append("❌ 未通过：" + "；".join("%s（%s）" % (a["name"], a["why"][:40]) for a in summary["rejected"]))
     if not summary["reviewed"]:
-        lines.append("今天没有送审（%s）" % ("大盘冰点" if regime.get("position_cap", 1) <= 0 else
+        lines.append("今天没有送审（%s）" % (cold if regime.get("position_cap", 1) <= 0 else
                                        "内置大模型未启用" if not llm.enabled() else "候选都已持有或已有结论"))
+    if emo.get("themes"):
+        lines.append("\n🔥 热门题材：" + "、".join("%s(%d家涨停)" % (t["name"], t["zt"]) for t in emo["themes"][:5]))
     lines.append("\n选股前5：" + "、".join("%s(%.1f)" % (c["name"], c["score"]) for c in cands[:5]))
     notify.send(an + "收盘总结：%s，通过%d只" % (regime.get("state"), len(summary["approved"])), "\n".join(lines))
     try:

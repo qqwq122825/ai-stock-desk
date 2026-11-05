@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS plans(
   created_at REAL, updated_at REAL, status TEXT, entry_price REAL, stop_loss REAL, target REAL,
   trailing_pct REAL, max_hold_days INTEGER, thesis TEXT, invalidation TEXT, watch_points TEXT,
   checks TEXT DEFAULT '{}', closed_at REAL, outcome TEXT);
+CREATE TABLE IF NOT EXISTS emotion_days(date TEXT PRIMARY KEY, data TEXT, updated_at REAL);
 CREATE INDEX IF NOT EXISTS idx_runs ON committee_runs(symbol, ts);
 CREATE INDEX IF NOT EXISTS idx_plans ON plans(account, symbol, status);
 CREATE INDEX IF NOT EXISTS idx_equity ON equity(account, ts);
@@ -148,6 +149,9 @@ def init_db():
         cols = [r[1] for r in c.execute("PRAGMA table_info(screens)").fetchall()]
         if "account" not in cols:
             c.execute("ALTER TABLE screens ADD COLUMN account TEXT DEFAULT 'paper'")
+        pcols = [r[1] for r in c.execute("PRAGMA table_info(plans)").fetchall()]
+        if "style" not in pcols:      # 迁移：持仓计划记录打法（swing 波段 / momentum 情绪短线）
+            c.execute("ALTER TABLE plans ADD COLUMN style TEXT DEFAULT 'swing'")
         cfg = load_config()
         now = time.time()
         first_run = not c.execute("SELECT 1 FROM accounts WHERE id='paper'").fetchone()

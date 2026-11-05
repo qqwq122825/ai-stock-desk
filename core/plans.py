@@ -6,7 +6,13 @@
 监控每轮检查（engine 调用 check_all）：
   stop_loss 跌破止损价（紧急；模拟盘可自动卖）· target 到达目标价 · trailing 从高点回撤
   time_stop 持有超期仍没涨 · invalidation 失效条件（收盘跌破/盘中跌破/均线破位/主力连续流出/出货特征/利空）
-触发后：推送 + 写信号 + 唤醒 AI 复核（除硬止损外不自动卖）。同一检查项每天只触发一次。
+触发后：推送 + 写信号 + 唤醒 AI 复核（波段：除硬止损外不自动卖）。同一检查项每天只触发一次。
+
+情绪短线（plan.style=momentum）——卖得比别人快，下面这些都直接自动卖（模拟盘；实盘生成待确认卖单）：
+  stop_loss 硬止损 −4% · trailing 浮盈 5% 后回撤 3% · gap_fail 早盘冲高回落/高开低走
+  vwap_break 10 点后跌破分时均价且板块走弱 · news_take_profit 有利好且大幅高开 → 利好兑现
+  theme_exit 14:30 后题材掉出热门且板块转跌 · time_stop 拿 3 天没涨 3%
+  封死涨停时除硬止损外都不卖（让利润跑）
 """
 import json
 import logging
@@ -41,8 +47,13 @@ def get_active(account=None, symbol=None):
     return rows
 
 
-def _defaults(price):
-    pc = load_config()["plans"]
+def _defaults(price, style="swing"):
+    cfg = load_config()
+    if style == "momentum":
+        mc = cfg["momentum"]
+        return {"stop_loss": round(price * (1 + mc["stop_pct"] / 100), 3), "target": None,
+                "trailing_pct": mc["trail_pct"], "max_hold_days": mc["max_hold_days"]}
+    pc = cfg["plans"]
     return {"stop_loss": round(price * (1 + pc["default_stop_pct"] / 100), 3), "target": None, "trailing_pct": 6,
             "max_hold_days": pc["default_max_hold_days"]}
 
@@ -54,9 +65,19 @@ def on_fill(acct, symbol, name, side, price, decision_id=None):
     now = time.time()
     act = get_active(acct, symbol)
     if side == "buy":
+        from .config import style as account_style
+        st = account_style(acct)
         run = committee.approved_run(symbol, acct)
-        f = (run or {}).get("final") or {}
-        d = _defaults(price)
+        f = dict((run or {}).get("final") or {})
+        d = _defaults(price, st)
+        if st == "momentum":
+            # 短线：委员会给的止损/持有天数/回撤比默认宽的，一律收紧到短线标准
+            if not f.get("stop_loss") or float(f["stop_loss"]) < d["stop_loss"]:
+                f["stop_loss"] = d["stop_loss"]
+            if not f.get("trailing_pct") or float(f["trailing_pct"]) > d["trailing_pct"]:
+                f["trailing_pct"] = d["trailing_pct"]
+            if not f.get("max_hold_days") or int(f["max_hold_days"]) > d["max_hold_days"]:
+                f["max_hold_days"] = d["max_hold_days"]
         fields = {
             "run_id": run["id"] if run else None,
             "entry_price": price,
@@ -65,7 +86,8 @@ def on_fill(acct, symbol, name, side, price, decision_id=None):
             "trailing_pct": f.get("trailing_pct") or d["trailing_pct"],
             "max_hold_days": int(f.get("max_hold_days") or d["max_hold_days"]),
             "thesis": f.get("thesis") or "未经投研委员会（手动/规则买入），使用默认止损%s%%和时间止损"
-                      % load_config()["plans"]["default_stop_pct"],
+                      % (load_config()["momentum"]["stop_pct"] if st == "momentum"
+                         else load_config()["plans"]["default_stop_pct"]),
             "invalidation": json.dumps(f.get("invalidation") or [], ensure_ascii=False),
             "watch_points": json.dumps(f.get("watch_points") or [], ensure_ascii=False),
         }
@@ -88,11 +110,11 @@ def on_fill(acct, symbol, name, side, price, decision_id=None):
                     log.info("计划 #%d 加仓后止损上移到保本 %.3f", p["id"], pos["avg_cost"])
             return p["id"]
         return db.run("INSERT INTO plans(account,symbol,name,run_id,created_at,updated_at,status,entry_price,stop_loss,"
-                      "target,trailing_pct,max_hold_days,thesis,invalidation,watch_points) "
-                      "VALUES(?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?)",
+                      "target,trailing_pct,max_hold_days,thesis,invalidation,watch_points,style) "
+                      "VALUES(?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?)",
                       (acct, symbol, name, fields["run_id"], now, now, price, fields["stop_loss"], fields["target"],
                        fields["trailing_pct"], fields["max_hold_days"], fields["thesis"], fields["invalidation"],
-                       fields["watch_points"]))
+                       fields["watch_points"], st))
     # sell：清仓则关闭计划
     left = db.one("SELECT shares FROM positions WHERE account=? AND symbol=?", (acct, symbol))
     if act and (not left or left["shares"] <= 0):
@@ -138,6 +160,68 @@ def _after_1450():
     return n.hour * 100 + n.minute >= 1450
 
 
+def _hm():
+    n = market.now()
+    return n.hour * 100 + n.minute
+
+
+def _after(hm):
+    return _hm() >= hm
+
+
+def _sealed(q):
+    lu = q.get("limit_up") or 0
+    return lu > 0 and q["price"] >= lu - 0.005 and (q.get("asks") or [[0, 0]])[0][1] == 0
+
+
+def momentum_exits(p, q, ps, mc, it):
+    """情绪短线的离场信号（都会自动卖）。返回 [(key, level, msg, auto)]。"""
+    out = []
+    hm = _hm()
+    price, opn, prev, high = q["price"], q.get("open") or 0, q.get("prev_close") or 0, q.get("high") or 0
+    if not prev or not opn:
+        return out
+    # 1) 早盘冲高回落 / 高开低走：9:30~10:00 从当天最高点回落 ≥ gap_fail_pct 且跌破开盘价
+    if 930 <= hm < 1000 and high and (high - price) / prev * 100 >= mc["gap_fail_pct"] and price < opn:
+        out.append(("gap_fail", "important", "早盘冲高回落：最高 %.2f%% 现 %.2f%%，跌破开盘价（高开低走先走）"
+                    % ((high / prev - 1) * 100, (price / prev - 1) * 100), True))
+    # 2) 利好兑现：今天有利好消息且高开 ≥ N%，冲高就卖（消息真假不重要，卖得比别人快）
+    pos_news = (it.get("news_today") or {}).get("pos", 0)
+    if pos_news and (opn / prev - 1) * 100 >= mc["news_take_profit_pct"] and price >= prev * (1 + mc["news_take_profit_pct"] / 100):
+        out.append(("news_take_profit", "important", "利好兑现：今天有%d条利好、高开%.1f%%，冲高先卖（主力常借利好出货）"
+                    % (pos_news, (opn / prev - 1) * 100), True))
+    # 3) 10 点后跌破分时均价且板块走弱
+    vol = q.get("volume") or 0
+    if hm >= 1000 and vol > 0:
+        vwap = q.get("amount", 0) / vol
+        if vwap > 0 and price < vwap * (1 - mc["vwap_break_pct"] / 100):
+            sec_pct = _sector_pct(p["symbol"], q.get("name", ""))
+            if sec_pct is not None and sec_pct < 0:
+                out.append(("vwap_break", "important", "跌破分时均价 %.3f 且板块翻绿（%.2f%%）" % (vwap, sec_pct), True))
+    # 4) 14:30 后题材降温：所在行业掉出热门题材且板块下跌
+    if mc.get("theme_exit") and hm >= 1430:
+        try:
+            from . import emotion
+            t = emotion.theme_of(p["symbol"])
+            sec_pct = _sector_pct(p["symbol"], q.get("name", ""))
+            if t["industry"] and (t["rank"] is None or t["rank"] > mc["theme_top"] * 2) and sec_pct is not None \
+                    and sec_pct < 0:
+                out.append(("theme_exit", "important", "题材降温：%s 已不在热门题材里，板块 %.2f%%"
+                            % (t["industry"], sec_pct), True))
+        except Exception as e:
+            log.debug("题材检查失败: %s", e)
+    return out
+
+
+def _sector_pct(sym, name=""):
+    try:
+        from . import news, screener
+        ind = news.industry(sym, name)
+        return (screener.sectors().get(ind) or {}).get("pct") if ind else None
+    except Exception:
+        return None
+
+
 def check_all(quotes, intel_map=None, kline_fn=None, positions=None):
     """返回触发列表 [{plan, key, level, message, auto_sell}]，并记录当日已触发避免重复。"""
     from . import news
@@ -151,21 +235,31 @@ def check_all(quotes, intel_map=None, kline_fn=None, positions=None):
         if not q or q.get("suspended") or not ps:
             continue
         price = q["price"]
+        mom = (p.get("style") or "swing") == "momentum"
+        mc = load_config()["momentum"] if mom else {}
         hits = []
         if p["stop_loss"] and price <= p["stop_loss"]:
             hits.append(("stop_loss", "urgent", "跌破止损价 %.3f（现价 %.3f）" % (p["stop_loss"], price), True))
         if p["target"] and price >= p["target"]:
-            hits.append(("target", "important", "到达目标价 %.3f，考虑分批止盈" % p["target"], False))
+            hits.append(("target", "important", "到达目标价 %.3f，%s" % (p["target"], "短线到目标直接卖" if mom
+                                                                   else "考虑分批止盈"), mom))
         peak = ps.get("peak_price") or 0
         tp = p["trailing_pct"] or 0
-        if tp and peak >= p["entry_price"] * 1.05 and price <= peak * (1 - tp / 100):
+        after = 1 + (mc.get("trail_after_pct", 5) / 100 if mom else 0.05)
+        if tp and peak >= p["entry_price"] * after and price <= peak * (1 - tp / 100):
             hits.append(("trailing", "important", "从持仓高点 %.3f 回撤 %.1f%%（移动止盈 %s%%）"
-                         % (peak, (price / peak - 1) * 100, tp), False))
+                         % (peak, (price / peak - 1) * 100, tp), mom))
         held_cal = (time.time() - p["created_at"]) / 86400
         pnl_pct = (price / p["entry_price"] - 1) * 100 if p["entry_price"] else 0
-        if p["max_hold_days"] and held_cal >= p["max_hold_days"] * 7 / 5 and pnl_pct < 3:
+        min_gain = mc.get("time_stop_min_gain", 3) if mom else 3
+        if p["max_hold_days"] and held_cal >= p["max_hold_days"] * 7 / 5 and pnl_pct < min_gain \
+                and (not mom or _after(1430)):
             hits.append(("time_stop", "important", "已持有约%d个交易日，收益 %.1f%% 未达预期（时间止损）"
-                         % (held_cal * 5 / 7, pnl_pct), False))
+                         % (held_cal * 5 / 7, pnl_pct), mom))
+        if mom:
+            hits += momentum_exits(p, q, ps, mc, intel_map.get(p["symbol"]) or {})
+            if _sealed(q):     # 封死涨停：除硬止损外都不卖，让利润跑
+                hits = [h for h in hits if h[0] == "stop_loss"]
         it = intel_map.get(p["symbol"]) or {}
         for i, inv in enumerate(p["invalidation"]):
             t = inv.get("type")
@@ -193,9 +287,16 @@ def check_all(quotes, intel_map=None, kline_fn=None, positions=None):
             if hit:
                 hits.append(("inv%d_%s" % (i, t), "important", "失效条件触发：%s" % desc, False))
         changed = False
+        sold = False
         for key, level, msg, auto in hits:
             if p["checks"].get(key) == today:
                 continue
+            if auto:
+                if p["account"] == "paper" and not ps.get("sellable") and key != "stop_loss":
+                    continue          # T+1 今天买的卖不了：不消耗这次检查，明天还能触发
+                if sold:
+                    auto = False      # 同一轮只自动卖一次，其余的只提醒
+                sold = sold or auto
             p["checks"][key] = today
             changed = True
             out.append({"plan": p, "position": ps, "key": key, "level": level, "message": msg, "auto_sell": auto,
@@ -208,6 +309,7 @@ def check_all(quotes, intel_map=None, kline_fn=None, positions=None):
 def brief(p, price=None):
     d = {k: p[k] for k in ("id", "account", "symbol", "name", "run_id", "entry_price", "stop_loss", "target",
                            "trailing_pct", "max_hold_days", "thesis", "invalidation", "watch_points")}
+    d["style"] = p.get("style") or "swing"
     d["created"] = market.datetime.fromtimestamp(p["created_at"], market.CN_TZ).strftime("%m-%d")
     d["held_trading_days"] = round((time.time() - p["created_at"]) / 86400 * 5 / 7, 1)
     d["triggered_today"] = [k for k, v in (p.get("checks") or {}).items() if v == market.today_str()]

@@ -345,16 +345,16 @@ class Monitor(threading.Thread):
                         if ps["sellable"] > 0:
                             tr = broker.paper_execute(p["symbol"], "sell", ps["sellable"], source="plan",
                                                       note="计划#%d %s" % (p["id"], t["message"]))
-                            res = "模拟盘已止损卖出 %d 股 @ %.3f，盈亏 %.2f" % (tr["shares"], tr["price"], tr["pnl"] or 0)
+                            res = "模拟盘已自动卖出 %d 股 @ %.3f，盈亏 %.2f" % (tr["shares"], tr["price"], tr["pnl"] or 0)
                         else:
                             res = "今日买入 T+1 不可卖"
                     elif p["account"] == "live":
                         o = broker.create_live_order(p["symbol"], t["name"], "sell", ps["shares"], t["price"],
                                                      reason="计划#%d %s" % (p["id"], t["message"]), source="plan")
-                        res = "已生成实盘止损卖单 #%d 待确认" % o["id"]
+                        res = "已生成实盘卖单 #%d 待确认" % o["id"]
                 except Exception as e:
-                    res = "自动止损失败：%s" % e
-            side = "sell" if t["key"] in ("stop_loss", "trailing") or t["key"].startswith("inv") else "watch"
+                    res = "自动卖出失败：%s" % e
+            side = "sell" if t["auto_sell"] or t["key"] in ("stop_loss", "trailing") or t["key"].startswith("inv") else "watch"
             db.run("INSERT INTO alerts(ts,source,strategy,symbol,name,type,side,strength,message,price,action_result)"
                    " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                    (time.time(), "plan", "plan#%d" % p["id"], p["symbol"], t["name"], t["key"], side, 1.0,

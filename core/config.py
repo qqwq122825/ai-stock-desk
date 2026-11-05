@@ -88,7 +88,9 @@ DEFAULTS = {
     "screener": {
         "kline_candidates": 150,        # 初筛后拉日K细算的数量
         "top_n": 20,                    # 候选池大小
-        "committee_top": 3,             # 收盘复盘时送委员会审核的数量
+        "committee_top": 10,            # 收盘复盘时送委员会审核的数量（分低于 committee_min_score 的不审）
+        "committee_min_score": 0.5,
+        "committee_parallel": 3,        # 同时开几个委员会（大模型便宜，并行省时间）
         "auto_daily": True,             # 交易日 15:05 自动选股+委员会（不需要外部 AI）
     },
     # 仓位管理
@@ -117,6 +119,24 @@ DEFAULTS = {
         "default_stop_pct": -7,         # 计划未给止损时的默认止损（波段）
         "default_max_hold_days": 20,    # 时间止损：持有超过N天且收益<3% 提醒
     },
+    # 打法：swing=波段（看趋势/基本面，拿几天到几周）；momentum=情绪短线（跟热门题材，卖得比别人快）
+    # 两种并存，各账户各用各的，跑一段时间后对比
+    "style": {"paper": "momentum", "live": "swing"},
+    # 情绪短线参数（只对 style=momentum 的账户生效）
+    "momentum": {
+        "stop_pct": -4,                 # 买入价下方 4% 硬止损
+        "trail_after_pct": 5,           # 浮盈超过 5% 启动回撤止盈
+        "trail_pct": 3,                 # 从最高点回撤 3% 就走
+        "max_hold_days": 3,             # 拿 3 个交易日还没涨 3% 就走（短线不等）
+        "time_stop_min_gain": 3,
+        "gap_fail_pct": 2,              # 早盘（9:30~10:00）从开盘价回落 2% 以上 = 高开低走/冲高回落 → 走
+        "vwap_break_pct": 1,            # 10 点后跌破分时均价 1% 且板块走弱 → 走
+        "news_take_profit_pct": 3,      # 有利好消息且高开 ≥3% → 利好兑现，冲高就卖（真假不重要，卖得快）
+        "theme_exit": True,             # 所在题材掉出热门题材前列且板块转跌 → 走
+        "theme_top": 8,                 # 只做前 8 名热门题材
+        "max_chase_pct": 8,             # 情绪短线允许买已涨 3~8% 的强势股，但不追涨停
+        "min_pct": 2,                   # 当日涨幅低于 2% 不算强势
+    },
     # 策略开关/参数覆盖：{"macd": {"enabled": true, "params": {...}, "cooldown_min": 240}}
     # 未列出的策略使用其 default_enabled 和默认参数
     "strategies": {},
@@ -129,7 +149,7 @@ DEFAULTS = {
 }
 
 SECRET_KEYS = {("notify", "pushplus_token"), ("notify", "serverchan_key"),
-               ("ai", "llm_api_key"), ("server", "token")}
+               ("ai", "llm_api_key"), ("server", "token"), ("server", "password")}
 
 _lock = threading.Lock()
 
@@ -180,3 +200,10 @@ def masked_config():
         if cfg.get(sec, {}).get(key):
             cfg[sec][key] = "******"
     return cfg
+
+
+def style(account, cfg=None):
+    """账户用哪种打法：swing 波段 / momentum 情绪短线。"""
+    cfg = cfg or load_config()
+    st = (cfg.get("style") or {}).get(account) or "swing"
+    return st if st in ("swing", "momentum") else "swing"

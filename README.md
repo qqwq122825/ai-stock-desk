@@ -24,7 +24,7 @@ cd ~/Documents/ai股票 && caffeinate -i python3 app.py     # 打开 http://127.
 
 ## 部署到服务器（宝塔）
 见 [docs/宝塔部署.md](docs/宝塔部署.md)：宝塔「Python项目」图形化添加，启动命令 `python3 app.py --host 127.0.0.1 --port 8686 --no-monitor`。
-在本机启动或部署前，通过环境变量 `AI_STOCK_PASSWORD` 设置独立的强密码。未设置时禁止登录。
+在本机启动或部署前，通过环境变量 `AI_STOCK_PASSWORD` 设置独立的强密码（也可以写在不进 Git 的 `data/config.json` 的 `server.password`）。两处都没设置时禁止登录。
 
 ## 页面
 

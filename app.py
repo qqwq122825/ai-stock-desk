@@ -397,6 +397,15 @@ def api_regime(q, body):
         return {"error": "大盘状态获取失败：%s" % e}
 
 
+@route("GET", "/api/emotion")
+def api_emotion(q, body):
+    from core import emotion
+    from core.config import load_config
+    e = emotion.sentiment()
+    e["styles"] = load_config().get("style", {})
+    return e
+
+
 @route("GET", "/api/committee")
 def api_committee_list(q, body):
     rows = db.all("SELECT id,ts,symbol,name,account,intent,mode,trigger,status,decision,confidence,price,error "

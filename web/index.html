@@ -590,16 +590,29 @@ function regimeCard(g){if(!g||g.error)return `<div class="card"><h3>大盘状态
    <div><small>两市成交额</small><span class="num">${g.amount_yi}亿</span></div>
    <div><small>沪深300 / MA20 / MA60</small><span class="num">${g.index?f2(g.index.hs300,0)+' / '+f2(g.index.ma20,0)+' / '+f2(g.index.ma60,0):'--'}</span></div></div>
   <div class="mute" style="margin-top:8px"><small>${(g.reasons||[]).map(esc).join('、')}</small></div></div>`}
+function emotionCard(g){if(!g||g.error)return `<div class="card"><h3>情绪周期</h3><div class="mute">${esc(g&&g.error||'暂无')}</div></div>`;
+  const col={冰点:'var(--blue)',退潮:'var(--down)',修复:'var(--accent)',升温:'var(--up)',高潮:'var(--up)'}[g.stage];
+  const st=g.styles||{},nm={momentum:'情绪短线',swing:'波段'};
+  return `<div class="card"><h3>情绪周期 · 热门题材 <span class="mute r">${esc(g.date||'')} · 模拟盘${nm[st.paper]||'波段'} / 实盘${nm[st.live]||'波段'}</span></h3>
+  <div class="row"><span class="big" style="color:${col}">${g.stage}</span><span>情绪短线新开仓上限 <b class="num">${Math.round(g.position_cap*100)}%</b></span><span class="mute">${esc(g.tip)}</span></div>
+  <div class="kv"><div><small>涨停 / 跌停 / 炸板</small><span class="num"><span class="up">${g.zt}</span> / <span class="down">${g.dt}</span> / ${g.zb}</span></div>
+   <div><small>炸板率</small><span class="num">${g.zb_rate}%</span></div><div><small>最高连板</small><span class="num">${g.max_lb}</span></div>
+   <div><small>昨日涨停今天</small><span class="num ${pc(g.yzt_avg_pct||0)}">${g.yzt_avg_pct==null?'--':sg(g.yzt_avg_pct)+'%'}</span></div></div>
+  <div style="margin-top:10px">${(g.themes||[]).map(t=>`<span class="tag" style="margin:2px">🔥${esc(t.name)} ${t.zt}家${t.max_lb>1?' · '+t.max_lb+'连板':''} <small class="mute">${t.leaders.map(x=>esc(x.name)).join('、')}</small></span>`).join('')}</div></div>`}
 async function pageScreen(first){
   const [s,runs,ov]=await Promise.all([api('/api/screen?account='+ACCT),api('/api/committee?account='+ACCT).catch(()=>[]),api('/api/overview').catch(()=>null)]);
   const L=s.latest,held=new Set(ov?ov.accounts[ACCT].positions.map(p=>p.symbol):[]),last={};
   runs.forEach(r=>{if(!last[r.symbol])last[r.symbol]=r});
   const prog=c=>held.has(c.symbol)?'<span class="tag ok">已持有</span>':last[c.symbol]?RUN_ST(last[c.symbol]):'<span class="tag">未审核</span>';
-  $('#app').innerHTML=`<div class="hint">${ACCT=='paper'?'<b>AI 今日选股 · 模拟盘专用</b>：每个交易日 15:05 自动选股，前 3 名自动送委员会，通过的由 AI 择机买入模拟盘。想加快某只的审核可以点「加急审核」。'
+  const MOM=(L&&L.stats&&L.stats.style)=='momentum';
+  $('#app').innerHTML=`<div class="hint">${ACCT=='paper'?'<b>AI 今日选股 · 模拟盘专用</b>：每个交易日 15:05 自动选股，前 10 名（分够的）自动送委员会，通过的由 AI 择机买入模拟盘。想加快某只的审核可以点「加急审核」。'
      :'<b>实盘选股 · 实盘专用</b>：和模拟盘完全分开，按你实盘的资金算「一手买不买得起」。实盘不会自动买，委员会通过后 AI 生成建议单等你确认。'}</div>
   <div class="grid g2" style="margin-bottom:14px"><div id="reg"><div class="card"><h3>大盘状态（择时）</h3><div class="mute">加载中…</div></div></div>
-  <div class="card"><h3>${ACCT=='paper'?'选股漏斗 · 模拟盘':'选股漏斗 · 实盘'}（波段 1~4 周）</h3><div class="mute"><small>全A+ETF → 交易权限/ST/停牌/次新/成交额/一手买得起 → 日K打分（趋势/位置/动量/量能/板块/波动/追高惩罚）→ 前40补充5日主力资金和公告风险 → Top20</small></div>
+  <div class="card"><h3>${ACCT=='paper'?'选股漏斗 · 模拟盘':'选股漏斗 · 实盘'}（${MOM?'情绪短线 1~3 天':'波段 1~4 周'}）</h3><div class="mute"><small>${MOM
+   ?'全A → 交易权限/ST/停牌/次新/成交额 → 只留热门题材（涨停最多的行业）和最强板块里今天涨 2%~8%、没封板的 → 打分（题材热度/强度/量比/主力/收在高位/不追高位股）→ Top20。卖：止损−4%、冲高回落、跌破均价、利好兑现、题材降温、3天不涨都自动卖'
+   :'全A+ETF → 交易权限/ST/停牌/次新/成交额/一手买得起 → 日K打分（趋势/位置/动量/量能/板块/波动/追高惩罚）→ 前40补充5日主力资金和公告风险 → Top20'}</small></div>
    <div id="sbox">${screenBox(s,L)}</div></div></div>
+  <div id="emo" style="margin-bottom:14px"></div>
   <div class="card"><h3>${ACCT=='paper'?'🎯 AI 候选池':'◆ 实盘候选池'} <span class="mute r">${L?'选于 '+L.ts+' · ':''}右侧是每只股票走到了哪一步</span></h3><div class="scroll"><table><tr><th>#</th><th>股票</th><th>行业</th><th class="n">得分</th><th class="n">现价</th><th class="n">涨幅</th><th>打分理由</th><th>进度</th><th></th></tr>
   ${L?L.candidates.map(c=>`<tr><td>${c.rank}</td><td><a href="javascript:openStock('${c.symbol}')">${esc(c.name)}</a> <small class="mute">${c.symbol}</small></td><td>${esc(c.industry)}</td>
    <td class="n acc">${f2(c.score,1)}</td><td class="n">${f2(c.price,2)}</td><td class="n ${pc(c.pct)}">${sg(c.pct)}%</td><td style="white-space:normal;min-width:320px"><small>${(c.reasons||[]).map(esc).join('、')}</small></td>
@@ -607,6 +620,7 @@ async function pageScreen(first){
    :`<tr><td colspan=9 class="empty">${ACCT=='paper'?'还没有选股结果，点"立即选股"':'实盘还没选过股。先在「持仓对账」录入资金，再点"立即选股"'}</td></tr>`}</table></div></div>`;
   // 大盘状态单独加载，接口慢也不挡住页面
   api('/api/regime').catch(e=>({error:e.message})).then(g=>{const e=$('#reg');if(e&&page=='screen')e.innerHTML=regimeCard(g)});
+  api('/api/emotion').catch(e=>({error:e.message})).then(g=>{const e=$('#emo');if(e&&page=='screen')e.innerHTML=emotionCard(g)});
   if(s.running)pollScreen();
 }
 function screenBox(s,L){
@@ -885,6 +899,11 @@ async function pageSettings(){
     <label>模拟盘计划止损自动卖</label>${chk('plans','auto_stop_loss_paper')}
     <label>默认止损%</label>${inp('plans','default_stop_pct','number')}
     <label>默认最长持有(天)</label>${inp('plans','default_max_hold_days','number')}
+    <label>打法 模拟盘 / 实盘</label><div class="row">${['paper','live'].map(a=>`<select data-sec="style" data-k="${a}" style="width:130px">${[['momentum','情绪短线'],['swing','波段']].map(([v,l])=>`<option value="${v}" ${(c.style||{})[a]==v?'selected':''}>${l}</option>`).join('')}</select>`).join('')}</div>
+    <label>短线止损% / 回撤止盈%</label><div class="row">${inp('momentum','stop_pct','number')}${inp('momentum','trail_pct','number')}</div>
+    <label>短线最长持有(天)</label>${inp('momentum','max_hold_days','number')}
+    <label>短线追高上限%</label>${inp('momentum','max_chase_pct','number')}
+    <label>送委员会数量 / 并行</label><div class="row">${inp('screener','committee_top','number')}${inp('screener','committee_parallel','number')}</div>
     <label>总仓位上限 强势/震荡/弱势/冰点</label><div class="row">${['强势','震荡','弱势','冰点'].map(k=>`<input type="number" step="0.05" class="cap" data-k="${k}" value="${c.regime.caps[k]}" style="width:64px">`).join('')}</div>
     <span></span><button class="pri" onclick="saveCfg()">保存</button></div></div>
   <div class="card"><h3>服务</h3><div class="form">

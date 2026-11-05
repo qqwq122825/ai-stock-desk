@@ -8,6 +8,11 @@
    → 前 40 只再查近5日主力资金 + 近7日公告（减持/问询等扣分）
    → Top N 候选池（写入 candidates 表），收盘复盘时送投研委员会审核前几名
 
+情绪短线（style=momentum 的账户，见 core/emotion.py）：
+   → 只在热门题材（涨停最多的行业）和最强板块里选
+   → 今天涨 2%~8%、没封死涨停、放量、主力流入、收在高位、没在高位连续暴涨的
+   → 总仓位上限 = 情绪周期上限（冰点 0 / 退潮 20% / 修复 50% / 升温 80% / 高潮 50%）
+
 大盘状态（regime）：上涨家数占比、涨停/跌停家数、两市成交额、沪深300 相对 MA20/MA60
   → 强势 / 震荡 / 弱势 / 冰点，对应不同总仓位上限（config.regime.caps）
 """
@@ -19,7 +24,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from . import broker, db, indicators, market, news
-from .config import load_config
+from .config import load_config, style as account_style
 
 log = logging.getLogger("screener")
 
@@ -278,6 +283,92 @@ def swing_score(s, kl, sec):
     return sc, why, metrics
 
 
+def momentum_pre(s, sec, hot, mc):
+    """情绪短线初筛分（快照）。hot: {行业: 题材排名}。不在热门题材/强势板块里返回 None。"""
+    if s["board"] == "etf":
+        return None
+    sr = (sec.get(s["industry"]) or {}).get("rank_pct")
+    rank = hot.get(s["industry"])
+    if rank is None and (sr is None or sr > 15):
+        return None
+    lim = market.limit_pct(s["symbol"], s["name"])
+    if not (mc["min_pct"] <= s["pct"] < min(mc["max_chase_pct"], lim - 0.3)):
+        return None
+    sc = (3 - min(rank, 10) * 0.2) if rank else 1
+    sc += min(s["vol_ratio"], 4) * 0.3 + (0.5 if s["main_pct"] > 0 else 0) + min(s["amount"] / 1e9, 2) * 0.3
+    return sc
+
+
+def momentum_score(s, kl, sec, hot, mc):
+    """情绪短线打分：题材热度 > 当日强度 > 量能资金 > 位置。返回 (score, reasons, metrics)。"""
+    c = [b["c"] for b in kl]
+    if len(c) < 20:
+        return None
+    sc, why = 0.0, []
+    rank = hot.get(s["industry"])
+    if rank:
+        sc += 2.5 if rank <= 3 else 1.5
+        why.append("热门题材第%d（%s）" % (rank, s["industry"]))
+    sr = sec.get(s["industry"])
+    if sr and sr["rank_pct"] <= 10:
+        sc += 1; why.append("板块今日前%.0f%%" % sr["rank_pct"])
+    if 3 <= s["pct"] <= 7:
+        sc += 1; why.append("今日涨%.1f%%（强势未封板）" % s["pct"])
+    elif s["pct"] > 7:
+        sc += 0.5; why.append("今日涨%.1f%%（接近涨停，次日分歧风险大）" % s["pct"])
+    if 1.5 <= s["vol_ratio"] <= 5:
+        sc += 1; why.append("量比%.1f" % s["vol_ratio"])
+    elif s["vol_ratio"] > 8:
+        sc -= 0.5; why.append("量比%.1f过大（可能是出货）" % s["vol_ratio"])
+    if s["main_pct"] > 5:
+        sc += 1; why.append("主力净占比%.1f%%" % s["main_pct"])
+    elif s["main_pct"] > 0:
+        sc += 0.5
+    elif s["main_pct"] < -5:
+        sc -= 1; why.append("涨着但主力净流出%.1f%%（小心借涨出货）" % s["main_pct"])
+    prev = s["prev_close"] or c[-2]
+    if prev:
+        shadow = (s["high"] - s["price"]) / prev * 100
+        if shadow <= 1:
+            sc += 0.5; why.append("收在最高附近")
+        elif shadow >= 4:
+            sc -= 1.5; why.append("冲高回落%.1f%%（上影线长）" % shadow)
+    ma5, ma10 = indicators.sma(c, 5), indicators.sma(c, 10)
+    if c[-1] > ma5 > ma10:
+        sc += 0.5; why.append("5/10日线多头")
+    chg5 = (c[-1] / c[-6] - 1) * 100
+    chg10 = (c[-1] / c[-11] - 1) * 100
+    if chg5 > 30 or chg10 > 50:
+        sc -= 2; why.append("短期已涨太多（5日%.0f%% 10日%.0f%%）高位接力风险大" % (chg5, chg10))
+    if 3 <= s["turnover"] <= 20:
+        sc += 0.5
+    elif s["turnover"] > 30:
+        sc -= 0.5; why.append("换手%.0f%%过高" % s["turnover"])
+    mv = s["total_mv"] / 1e8
+    if 30 <= mv <= 500:
+        sc += 0.5
+    metrics = {"theme_rank": rank, "chg5d": round(chg5, 2), "chg10d": round(chg10, 2), "ma5": round(ma5, 3),
+               "ma10": round(ma10, 3), "vol_ratio": s["vol_ratio"], "turnover": s["turnover"], "style": "momentum"}
+    return sc, why, metrics
+
+
+def position_cap(account="paper"):
+    """该账户新开仓的总仓位上限。
+    波段：看大盘状态（config.regime.caps）。
+    情绪短线：看情绪周期（emotion.STAGE_CAPS）；大盘冰点时也是 0。"""
+    reg = market_regime()
+    out = {"style": account_style(account), "regime": reg["state"], "cap": reg["position_cap"]}
+    if out["style"] == "momentum":
+        from . import emotion
+        emo = emotion.sentiment()
+        if emo.get("error"):
+            out["emotion_error"] = emo["error"]          # 情绪数据拿不到时退回按大盘
+        else:
+            out["emotion"] = emo["stage"]
+            out["cap"] = 0.0 if reg["state"] == "冰点" else emo["position_cap"]
+    return out
+
+
 # ---- 运行状态（网页按钮和 15:05 自动流程共用，同一时间只跑一个） ----
 KLINE_BUDGET_SEC = 75      # 拉日K最多花这么久，超时就用已经拿到的（免费接口偶尔会被限流卡住）
 ENRICH_BUDGET_SEC = 30     # 资金流/公告补充最多花这么久
@@ -364,11 +455,31 @@ def _run(save=True, top_n=None, progress=None, account="paper"):
     _stage("板块和大盘状态")
     sec = sectors()
     regime = market_regime()
+    mom = account_style(account, cfg) == "momentum"
+    mc = cfg["momentum"]
+    hot = {}
+    if mom:
+        from . import emotion
+        _stage("情绪周期和热门题材")
+        emo = emotion.sentiment()
+        regime = dict(regime, style="momentum")
+        if emo.get("error"):
+            regime["emotion_error"] = emo["error"]
+        else:
+            regime["emotion"] = emo
+            regime["position_cap"] = 0.0 if regime["state"] == "冰点" else emo["position_cap"]
+            hot = {t["name"]: t["rank"] for t in emo["themes"] if t["rank"] <= mc["theme_top"]}
 
     max_lot_value = equity * cfg["risk"]["max_position_pct"]
     universe = snap["stocks"] + snap["etfs"]
     passed, dropped = hard_filter(universe, cfg, max_lot_value)
-    passed.sort(key=lambda s: -pre_score(s, sec))
+    if mom:
+        ps = [(momentum_pre(s, sec, hot, mc), s) for s in passed]
+        dropped["不在热门题材/不够强"] = sum(1 for p, _ in ps if p is None)
+        ps = sorted([x for x in ps if x[0] is not None], key=lambda x: -x[0])
+        passed = [s for _, s in ps]
+    else:
+        passed.sort(key=lambda s: -pre_score(s, sec))
     pool = passed[:cfg["screener"]["kline_candidates"]]
     if progress:
         progress("初筛 %d → %d，拉日K %d 只" % (len(universe), len(passed), len(pool)))
@@ -392,7 +503,7 @@ def _run(save=True, top_n=None, progress=None, account="paper"):
         for s, kl in ex.map(k, pool):
             if not kl:
                 continue
-            r = swing_score(s, kl, sec)
+            r = momentum_score(s, kl, sec, hot, mc) if mom else swing_score(s, kl, sec)
             if r:
                 scored.append(dict(s, score=r[0], reasons=r[1], metrics=r[2]))
     scored.sort(key=lambda x: -x["score"])
@@ -427,13 +538,20 @@ def _run(save=True, top_n=None, progress=None, account="paper"):
     with ThreadPoolExecutor(max_workers=6) as ex:
         deep = list(ex.map(enrich, deep))
     deep.sort(key=lambda x: -x["score"])
+    if mom:      # 同一题材最多留 4 只，避免候选池全是一个板块（题材一熄火就全军覆没）
+        per, kept = {}, []
+        for x in deep:
+            per[x["industry"]] = per.get(x["industry"], 0) + 1
+            if per[x["industry"]] <= 4:
+                kept.append(x)
+        deep = kept
     top = deep[:top_n or cfg["screener"]["top_n"]]
     if pool and len(scored) < len(pool) * 0.5:
         log.warning("日K获取成功率低：%d/%d", len(scored), len(pool))
     _stage("保存结果")
     if skipped["n"]:
         log.warning("日K拉取超出 %ds 预算，跳过 %d 只", KLINE_BUDGET_SEC, skipped["n"])
-    stats = {"universe": len(universe), "passed": len(passed), "klined": len(scored), "kline_requested": len(pool),
+    stats = {"style": "momentum" if mom else "swing", "universe": len(universe), "passed": len(passed), "klined": len(scored), "kline_requested": len(pool),
              "kline_skipped": skipped["n"],
              "dropped": dropped,
              "seconds": round(time.time() - t0, 1), "max_lot_value": round(max_lot_value)}

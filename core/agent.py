@@ -241,6 +241,8 @@ def build_context(with_ticks=True, with_intel=True):
     return {
         "now": now.strftime("%Y-%m-%d %H:%M:%S %a"),
         "market_regime": regime,
+        "trading_style": {ac: _style_of(ac, cfg) for ac in ("paper", "live")},
+        "emotion": _emotion_brief(cfg),
         "global_overnight": glob,
         "position_plans": active_plans,
         "positions_without_plan": no_plan,
@@ -349,6 +351,27 @@ def daily_report(day=None):
 
 
 # ---------------- 风控 ----------------
+def _style_of(acct, cfg):
+    from .config import style
+    return style(acct, cfg)
+
+
+def _emotion_brief(cfg):
+    """有账户用情绪短线时，给 AI 看情绪周期和热门题材。"""
+    if not any(_style_of(a, cfg) == "momentum" for a in ("paper", "live")):
+        return None
+    try:
+        from . import emotion
+        e = emotion.sentiment()
+        if e.get("error"):
+            return e
+        return {"stage": e["stage"], "position_cap": e["position_cap"], "tip": e["tip"], "reasons": e["reasons"],
+                "hot_themes": [{"name": t["name"], "zt": t["zt"], "max_lb": t["max_lb"],
+                                "leaders": [x["name"] for x in t["leaders"]]} for t in e["themes"][:6]]}
+    except Exception as ex:
+        return {"error": str(ex)[:100]}
+
+
 def size_and_check(acct, act, q, snap, cfg, watch_syms, regime_cap=None, cap_pct=None, stop=None):
     """计算股数并做风控，返回股数；不通过抛 OrderError。
     regime_cap：大盘状态对应的总仓位上限；cap_pct：委员会给的该票仓位上限；stop：止损价（风险定仓用）。
@@ -387,8 +410,11 @@ def size_and_check(acct, act, q, snap, cfg, watch_syms, regime_cap=None, cap_pct
                                                   "/".join(market.BOARD_NAMES[x] for x in cfg["universe"]["boards"])))
     if risk["restrict_to_watchlist"] and sym not in watch_syms:
         raise OrderError("风控：只允许买入自选股")
-    if q["pct"] >= risk["max_chase_pct"]:
-        raise OrderError("风控：当日已涨 %.2f%%，超过追高上限 %.1f%%" % (q["pct"], risk["max_chase_pct"]))
+    from .config import style as _style
+    mom = _style(acct, cfg) == "momentum"
+    chase = cfg["momentum"]["max_chase_pct"] if mom else risk["max_chase_pct"]
+    if q["pct"] >= chase:
+        raise OrderError("风控：当日已涨 %.2f%%，超过追高上限 %.1f%%" % (q["pct"], chase))
     if snap["day_pnl_pct"] is not None and snap["day_pnl_pct"] / 100 <= risk["daily_loss_limit_pct"]:
         raise OrderError("风控熔断：当日亏损 %.2f%%，禁止新买入" % snap["day_pnl_pct"])
     held = [p["symbol"] for p in snap["positions"]]
@@ -427,7 +453,8 @@ def size_and_check(acct, act, q, snap, cfg, watch_syms, regime_cap=None, cap_pct
             stop = max(float(stop or 0), pos["avg_cost"])   # 加仓后止损提到保本，加仓部分的风险按保本价算
     # 3) 定仓方式
     if sz["mode"] == "risk":
-        stop = float(stop) if stop else round(price * (1 + cfg["plans"]["default_stop_pct"] / 100), 3)
+        dflt = cfg["momentum"]["stop_pct"] if mom else cfg["plans"]["default_stop_pct"]
+        stop = float(stop) if stop else round(price * (1 + dflt / 100), 3)
         per = price - stop
         if per <= 0:
             raise OrderError("止损价 %.3f 不低于买入价 %.3f，无法按风险定仓" % (stop, price))
@@ -446,7 +473,7 @@ def size_and_check(acct, act, q, snap, cfg, watch_syms, regime_cap=None, cap_pct
         if room < max_val:
             max_val = room
             if room <= 0:
-                raise OrderError("大盘状态总仓位上限 %.0f%%，已用 %.0f%%" % (regime_cap * 100,
+                raise OrderError("大盘/情绪总仓位上限 %.0f%%，已用 %.0f%%" % (regime_cap * 100,
                                                                  snap["market_value"] / equity * 100))
     if risk["max_order_value"]:
         max_val = min(max_val, risk["max_order_value"])
@@ -508,13 +535,18 @@ def apply_decision(dec, agent="external", trigger="timer"):
             results.setdefault("plans", []).append("更新计划失败 %s: %s" % (p.get("symbol"), e))
 
     watch_syms = {w["symbol"] for w in db.all("SELECT symbol FROM watchlist")}
-    regime_cap = None
-    if any((a.get("action") or "").lower() == "buy" for a in dec.get("actions") or []):
-        try:
-            from . import screener
-            regime_cap = screener.market_regime()["position_cap"]
-        except Exception as e:
-            log.warning("大盘状态获取失败，不做总仓位限制: %s", e)
+    caps = {}
+
+    def regime_cap_for(acct):
+        """总仓位上限：波段看大盘状态；情绪短线再和情绪周期取小。"""
+        if acct not in caps:
+            try:
+                from . import screener
+                caps[acct] = screener.position_cap(acct)["cap"]
+            except Exception as e:
+                log.warning("大盘/情绪状态获取失败，不做总仓位限制: %s", e)
+                caps[acct] = None
+        return caps[acct]
     for act in dec.get("actions") or []:
         side = (act.get("action") or "hold").lower()
         if side not in ("buy", "sell"):
@@ -565,7 +597,7 @@ def apply_decision(dec, agent="external", trigger="timer"):
                         stop = ap[0]["stop_loss"] if ap else None
                 ab = dict(act, action=side)
                 n = size_and_check(acct, ab, q, snap, cfg, watch_syms,
-                                   regime_cap=regime_cap if side == "buy" else None, cap_pct=cap_pct, stop=stop)
+                                   regime_cap=regime_cap_for(acct) if side == "buy" else None, cap_pct=cap_pct, stop=stop)
                 if ab.get("_sizing"):
                     r["sizing"] = ab["_sizing"]
                 if acct == "paper":
@@ -578,7 +610,10 @@ def apply_decision(dec, agent="external", trigger="timer"):
                                                              "，盈亏%.2f" % t["pnl"] if t["pnl"] is not None else ""))
                     if side == "buy" and act.get("stop_loss") and not r.get("committee_run"):
                         from . import plans as plans_mod
-                        plans_mod.update(acct, q["symbol"], {"stop_loss": float(act["stop_loss"])}, author=agent)
+                        try:
+                            plans_mod.update(acct, q["symbol"], {"stop_loss": float(act["stop_loss"])}, author=agent)
+                        except ValueError as e:      # 计划默认止损更紧（如情绪短线 -4%）：保留更紧的，不影响已成交
+                            r["plan_note"] = str(e)
                 else:
                     ref = q["ask1"] if side == "buy" else q["bid1"]
                     o = broker.create_live_order(q["symbol"], q["name"], side, n, ref or q["price"],

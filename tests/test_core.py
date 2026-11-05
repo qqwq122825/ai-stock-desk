@@ -61,6 +61,11 @@ REGIME = {"state": "强势", "position_cap": 0.9, "score": 3}
 screener.market_regime = lambda ttl=120: dict(REGIME)
 screener.sectors = lambda ttl=120: {}
 news.industry = lambda sym, name="": "半导体" if sym.endswith("000001") else ""
+import core.emotion as emotion  # noqa: E402
+REAL_POOL = emotion.pool
+POOLS = {"zt": [], "zb": [], "dt": [], "yzt": []}
+emotion.pool = lambda kind, date=None: list(POOLS[kind])
+emotion._last_trade_date = lambda: market.now().strftime("%Y%m%d")
 import core.global_market as gm  # noqa: E402
 REAL_OVERNIGHT = gm.overnight
 
@@ -85,7 +90,8 @@ class Base(unittest.TestCase):
         if os.path.exists(db.DB_PATH):
             os.remove(db.DB_PATH)
         config.save_config({"paper": {"slippage_pct": 0, "initial_cash": 10000},
-                            "committee": {"required_for_buy": False}})
+                            "committee": {"required_for_buy": False},
+                            "style": {"paper": "swing", "live": "swing"}})   # 老用例按波段；情绪短线见 TestMomentum
         REGIME.update(state="强势", position_cap=0.9)
         db.init_db()
         PRICES.clear()
@@ -898,6 +904,138 @@ class TestCommitteeAndPlans(Base):
         self.assertEqual(ctx["market_regime"]["state"], "强势")
         self.assertEqual(ctx["position_plans"][0]["symbol"], "sz000001")
         self.assertEqual(ctx["positions_without_plan"], [])
+
+
+def _zt(code, ind, lbc=1, fbt=93000, m=0, pct=10.0):
+    return {"symbol": ("sh" if m else "sz") + code, "name": "涨停" + code, "price": 10, "pct": pct, "industry": ind,
+            "lbc": lbc, "first_seal": fbt, "open_times": 0, "amount": 1e8, "float_mv": 5e9, "turnover": 5,
+            "seal_fund": 1e7}
+
+
+def set_pools(n_zt=84, n_zb=48, n_dt=0, yzt_pct=4.5, inds=("光伏设备",) * 11 + ("半导体",) * 4, max_lb=4):
+    zt = [_zt("%06d" % (600000 + i), inds[i] if i < len(inds) else "其他%d" % i, lbc=max_lb if i == 0 else 1,
+              fbt=93000 + i) for i in range(n_zt)]
+    POOLS.update(zt=zt, zb=[_zt("%06d" % (1000 + i), "x") for i in range(n_zb)],
+                 dt=[_zt("%06d" % (2000 + i), "y", pct=-10) for i in range(n_dt)],
+                 yzt=[_zt("%06d" % (3000 + i), "z", pct=yzt_pct) for i in range(20)])
+
+
+class TestMomentum(Base):
+    """情绪短线：情绪周期、热门题材、短线计划、快速离场。"""
+
+    def setUp(self):
+        super().setUp()
+        config.save_config({"style": {"paper": "momentum", "live": "swing"}})
+        set_pools()
+        from core import plans
+        self._hm = plans._hm
+        self.addCleanup(setattr, plans, "_hm", self._hm)
+
+    def test_sentiment_stages(self):
+        e = emotion.sentiment()
+        self.assertEqual(e["zt"], 84)
+        self.assertAlmostEqual(e["zb_rate"], 36.4, 1)
+        self.assertEqual(e["stage"], "修复")
+        self.assertEqual(e["themes"][0]["name"], "光伏设备")
+        self.assertEqual(e["themes"][0]["leaders"][0]["lbc"], 4)
+        set_pools(n_zt=20)
+        self.assertEqual(emotion.sentiment(date="20991231")["stage"], "冰点")
+        set_pools(n_zt=80, n_zb=20, yzt_pct=5)
+        self.assertEqual(emotion.sentiment(date="20991230")["stage"], "升温")
+        set_pools(n_zt=80, n_zb=80, yzt_pct=1)
+        self.assertEqual(emotion.sentiment(date="20991229")["stage"], "退潮")
+        set_pools(n_zt=120, n_zb=20, yzt_pct=5, max_lb=7)
+        self.assertEqual(emotion.sentiment(date="20991228")["stage"], "高潮")
+
+    def test_style_per_account(self):
+        self.assertEqual(config.style("paper"), "momentum")
+        self.assertEqual(config.style("live"), "swing")
+
+    def test_momentum_plan_defaults(self):
+        from core import plans
+        PRICES["sz000001"] = fake_quote("000001", 10.0)
+        broker.paper_execute("000001", "buy", 300)
+        p = plans.get_active("paper", "000001")[0]
+        self.assertEqual(p["style"], "momentum")
+        self.assertAlmostEqual(p["stop_loss"], round(10.01 * 0.96, 3))
+        self.assertEqual(p["trailing_pct"], 3)
+        self.assertEqual(p["max_hold_days"], 3)
+
+    def test_chase_limit_and_emotion_cap(self):
+        PRICES["sz000001"] = fake_quote("000001", 10.6, pct=6)    # 波段 5% 不追；短线允许到 8%
+        res = agent.apply_decision({"actions": [{"symbol": "000001", "action": "buy", "confidence": 0.9}]})
+        self.assertEqual(res["actions"][0]["status"], "filled", res)
+        set_pools(n_zt=20)                                          # 冰点 → 情绪仓位 0
+        PRICES["sz000002"] = fake_quote("000002", 10.0, pct=4)
+        res = agent.apply_decision({"actions": [{"symbol": "000002", "action": "buy", "confidence": 0.9}]})
+        self.assertIn("总仓位上限", res["actions"][0]["error"])
+
+    def _hold(self, price=10.0):
+        from core import plans
+        PRICES["sz000001"] = fake_quote("000001", price)
+        broker.paper_execute("000001", "buy", 300)
+        return plans
+
+    def test_gap_fail_waits_for_t1_then_sells(self):
+        plans = self._hold()
+        plans._hm = lambda: 945
+        q = fake_quote("000001", 10.1, prev=10.0)
+        q.update(open=10.3, high=10.5)                              # 高开冲高后跌破开盘价
+        self.assertEqual(plans.check_all({"sz000001": q}, {}, None, broker.get_positions()), [])  # T+1 不触发也不消耗
+        db.run("UPDATE positions SET last_buy_date='2000-01-01'")
+        hits = plans.check_all({"sz000001": q}, {}, None, broker.get_positions())
+        self.assertEqual([(h["key"], h["auto_sell"]) for h in hits], [("gap_fail", True)])
+
+    def test_news_take_profit_and_sealed_hold(self):
+        plans = self._hold()
+        db.run("UPDATE positions SET last_buy_date='2000-01-01'")
+        plans._hm = lambda: 1030
+        q = fake_quote("000001", 10.5, prev=10.0)
+        q.update(open=10.45, high=10.6)
+        hits = plans.check_all({"sz000001": q}, {"sz000001": {"news_today": {"pos": 2}}}, None,
+                               broker.get_positions())
+        self.assertEqual([h["key"] for h in hits], ["news_take_profit"])
+        self.assertTrue(hits[0]["auto_sell"])
+        # 封死涨停：同样的利好也不卖
+        db.run("UPDATE plans SET checks='{}'")
+        q = fake_quote("000001", 11.0, prev=10.0, ask1=0)
+        q.update(open=10.5, high=11.0, limit_up=11.0, asks=[[0, 0]] * 5)
+        self.assertEqual(plans.check_all({"sz000001": q}, {"sz000001": {"news_today": {"pos": 2}}}, None,
+                                         broker.get_positions()), [])
+
+    def test_only_one_auto_sell_per_round(self):
+        plans = self._hold()
+        db.run("UPDATE positions SET last_buy_date='2000-01-01', peak_price=11")
+        plans._hm = lambda: 945
+        q = fake_quote("000001", 9.5, prev=10.0)                    # 同时触发 止损 + 回撤 + 冲高回落
+        q.update(open=10.0, high=10.4)
+        hits = plans.check_all({"sz000001": q}, {}, None, broker.get_positions())
+        self.assertEqual(sum(1 for h in hits if h["auto_sell"]), 1)
+        self.assertEqual(hits[0]["key"], "stop_loss")
+
+    def test_swing_plan_unchanged(self):
+        config.save_config({"style": {"paper": "swing"}})
+        plans = self._hold()
+        db.run("UPDATE positions SET last_buy_date='2000-01-01'")
+        plans._hm = lambda: 945
+        q = fake_quote("000001", 10.1, prev=10.0)
+        q.update(open=10.3, high=10.5)
+        self.assertEqual(plans.check_all({"sz000001": q}, {}, None, broker.get_positions()), [])
+
+    def test_momentum_score(self):
+        s = {"symbol": "sz000001", "name": "x", "board": "main", "industry": "光伏设备", "pct": 5, "vol_ratio": 2.5,
+             "main_pct": 6, "prev_close": 10, "high": 10.55, "price": 10.5, "turnover": 8, "total_mv": 1e10,
+             "amount": 5e8}
+        hot = {"光伏设备": 1}
+        mc = config.load_config()["momentum"]
+        self.assertIsNotNone(screener.momentum_pre(s, {}, hot, mc))
+        self.assertIsNone(screener.momentum_pre(dict(s, industry="银行"), {}, hot, mc))   # 不在热门题材
+        self.assertIsNone(screener.momentum_pre(dict(s, pct=9.8), {}, hot, mc))          # 快涨停不追
+        sc, why, m = screener.momentum_score(s, fake_kline("sz000001"), {}, hot, mc)
+        self.assertGreater(sc, 5)
+        self.assertTrue(any("热门题材第1" in w for w in why))
+        bad = dict(s, high=11.0, main_pct=-8)                       # 冲高回落 + 主力流出
+        self.assertLess(screener.momentum_score(bad, fake_kline("sz000001"), {}, hot, mc)[0], sc - 3)
 
 
 def tearDownModule():
