@@ -406,11 +406,25 @@ def api_emotion(q, body):
     return e
 
 
+@route("GET", "/api/entry-watch")
+def api_entry_watch(q, body):
+    from core import watch
+    return [watch.brief(w) for w in watch.active(q.get("account"))]
+
+
 @route("GET", "/api/committee")
 def api_committee_list(q, body):
     rows = db.all("SELECT id,ts,symbol,name,account,intent,mode,trigger,status,decision,confidence,price,error "
                   "FROM committee_runs WHERE COALESCE(NULLIF(account,''),'paper')=? ORDER BY id DESC LIMIT 50",
                   (q.get("account", "paper"),))
+    ws = {}
+    for w in db.all("SELECT run_id,status,entry,kind,expires_at,rerun_id FROM entry_watch WHERE run_id IN (%s)"
+                    % ",".join(str(int(r["id"])) for r in rows) if rows else "SELECT 1 WHERE 0"):
+        ws[w["run_id"]] = w
+    for r in rows:
+        w = ws.get(r["id"])
+        if w:
+            r["watch"] = {"status": w["status"], "entry": w["entry"], "kind": w["kind"], "rerun_id": w["rerun_id"]}
     return fmt_rows(rows)
 
 

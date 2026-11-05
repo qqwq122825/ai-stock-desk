@@ -245,6 +245,7 @@ def build_context(with_ticks=True, with_intel=True):
         "emotion": _emotion_brief(cfg),
         "global_overnight": glob,
         "position_plans": active_plans,
+        "entry_watch": _entry_watch(),
         "positions_without_plan": no_plan,
         "candidates": cands,
         "committee_recent": runs,
@@ -351,6 +352,15 @@ def daily_report(day=None):
 
 
 # ---------------- 风控 ----------------
+def _entry_watch():
+    """委员会说「等回踩再买」、程序正在盯的票（到价会自动重开委员会复审）。"""
+    try:
+        from . import watch
+        return [watch.brief(w) for w in watch.active()]
+    except Exception:
+        return []
+
+
 def _style_of(acct, cfg):
     from .config import style
     return style(acct, cfg)

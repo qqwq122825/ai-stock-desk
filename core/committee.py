@@ -206,6 +206,11 @@ def finalize(run_id, final):
     status = "approved" if decision in ("buy", "add") else "rejected"
     if run["status"] == "running" or run["status"] == "external":
         save_opinion(run_id, "pm", final, 1)
+    if status == "rejected" and decision == "wait":
+        from . import watch
+        wid = watch.on_finalize(dict(run), final)
+        if wid:
+            final["entry_watch"] = wid
     db.run("UPDATE committee_runs SET status=?,decision=?,confidence=?,final=?,finished_at=? WHERE id=?",
            (status, decision, conf, json.dumps(final, ensure_ascii=False), time.time(), run_id))
     return dict(final, run_id=run_id, status=status)

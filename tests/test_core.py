@@ -1086,6 +1086,59 @@ class TestMomentum(Base):
         self.assertLess(screener.momentum_score(bad, fake_kline("sz000001"), {}, hot, mc)[0], sc - 3)
 
 
+class TestEntryWatch(Base):
+    """委员会「等回踩」：登记、到价站稳、跌破作废、到价复审不循环。"""
+
+    def _wait_run(self, entry=9.6, stop=9.2, trigger="每日收盘自动", price=10.0):
+        from core import committee
+        PRICES["sz000001"] = fake_quote("000001", price)
+        r = committee.start_external("000001", "paper")
+        db.run("UPDATE committee_runs SET trigger=? WHERE id=?", (trigger, r["run_id"]))
+        return committee.finalize(r["run_id"], {"decision": "wait", "confidence": 0.7, "entry_max": entry,
+                                                "stop_loss": stop, "target": 11, "summary": "等回踩"})
+
+    def test_register_and_trigger(self):
+        from core import watch
+        fin = self._wait_run()
+        self.assertEqual(fin["status"], "rejected")
+        w = watch.active("paper")[0]
+        self.assertEqual((w["kind"], w["entry"], w["stop"], w["run_id"]), ("pullback", 9.6, 9.2, fin["run_id"]))
+        q = fake_quote("000001", 9.65)
+        q["low"] = 9.55
+        self.assertEqual(watch.triggered(w, q, hm=945)[0], None)          # 10 点前不判断
+        self.assertEqual(watch.triggered(w, q, hm=1030)[0], "hit")         # 回到入场价附近且从低点拉回
+        q2 = dict(q, price=9.56, low=9.55)
+        self.assertEqual(watch.triggered(w, q2, hm=1030)[0], None)        # 还贴着最低点，没站稳
+        self.assertEqual(watch.triggered(w, dict(q, price=9.1), hm=1030)[0], "invalid")
+        self.assertEqual(watch.triggered(w, dict(q, price=9.9), hm=1030)[0], None)   # 还没回踩到
+
+    def test_breakout_and_check(self):
+        from core import watch
+        self._wait_run(entry=10.5, stop=9.8)
+        w = watch.active()[0]
+        self.assertEqual(w["kind"], "breakout")
+        self.assertEqual(watch.triggered(w, fake_quote("000001", 10.55), hm=1100)[0], "hit")
+        self.assertEqual(watch.triggered(w, fake_quote("000001", 10.7), hm=1100)[0], None)    # 冲太高不追
+        real = watch._hm
+        watch._hm = lambda: 1100
+        self.addCleanup(setattr, watch, "_hm", real)
+        hits = watch.check({"sz000001": fake_quote("000001", 10.52)})
+        self.assertEqual(hits[0]["status"], "hit")
+        self.assertEqual(watch.active(), [])
+        self.assertEqual(db.one("SELECT status FROM entry_watch")["status"], "triggered")
+
+    def test_no_loop_and_expire(self):
+        from core import watch
+        self._wait_run(trigger="等回踩到价复审")
+        self.assertEqual(watch.active(), [])                                # 复审又说等：不再登记
+        self._wait_run()
+        db.run("UPDATE entry_watch SET expires_at=1")
+        watch.check({})
+        self.assertEqual(watch.active(), [])
+        self._wait_run(entry=10.2, stop=10.5)                              # 止损高于入场价：不登记
+        self.assertEqual(watch.active(), [])
+
+
 def tearDownModule():
     shutil.rmtree(TMP, ignore_errors=True)
 

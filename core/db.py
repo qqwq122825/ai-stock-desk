@@ -61,6 +61,10 @@ CREATE TABLE IF NOT EXISTS plans(
   created_at REAL, updated_at REAL, status TEXT, entry_price REAL, stop_loss REAL, target REAL,
   trailing_pct REAL, max_hold_days INTEGER, thesis TEXT, invalidation TEXT, watch_points TEXT,
   checks TEXT DEFAULT '{}', closed_at REAL, outcome TEXT);
+CREATE TABLE IF NOT EXISTS entry_watch(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT, symbol TEXT, name TEXT, run_id INTEGER, kind TEXT,
+  entry REAL, stop REAL, target REAL, ref_price REAL, created_at REAL, expires_at REAL, status TEXT,
+  updated_at REAL, rerun_id INTEGER, note TEXT);
 CREATE TABLE IF NOT EXISTS emotion_days(date TEXT PRIMARY KEY, data TEXT, updated_at REAL);
 CREATE INDEX IF NOT EXISTS idx_runs ON committee_runs(symbol, ts);
 CREATE INDEX IF NOT EXISTS idx_plans ON plans(account, symbol, status);

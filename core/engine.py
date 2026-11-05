@@ -131,7 +131,12 @@ class Monitor(threading.Thread):
         pos = broker.get_positions()
         explicit = [r["symbol"] for r in db.all("SELECT DISTINCT symbol FROM rules WHERE enabled=1")
                     if not r["symbol"].startswith("*")]
-        return watch, pos, list(dict.fromkeys(watch + [p["symbol"] for p in pos] + explicit))
+        from . import watch as entry_watch
+        try:
+            ew = entry_watch.symbols()
+        except Exception:
+            ew = []
+        return watch, pos, list(dict.fromkeys(watch + [p["symbol"] for p in pos] + ew + explicit))
 
     def kline(self, sym):
         q = self.ticks[sym][-1] if self.ticks[sym] else None
@@ -253,6 +258,21 @@ class Monitor(threading.Thread):
         lines.append("\n美股影响主要在开盘，注意高开低走/低开高走，不要开盘第一分钟追。")
         notify.send("盘前外盘：%s" % s["mood"], "\n".join(lines))
 
+    def check_entry_watch(self, cfg, quotes):
+        """委员会说「等回踩到 X 再买」的，到价站稳就自动重开委员会复审。"""
+        from . import watch as entry_watch
+        try:
+            hits = entry_watch.check(quotes, cfg)
+        except Exception as e:
+            log.warning("等回踩检查失败: %s", e)
+            return
+        for h in hits:
+            w = h["watch"]
+            notify.send("等回踩%s：%s" % ("到价复审" if h["status"] == "hit" else "作废", h["name"]),
+                        "**%s %s** 现价 %.3f（%s，委员会#%d 说等回踩 %.3f）  \n%s"
+                        % (h["name"], w["symbol"], h["price"], "模拟盘" if w["account"] == "paper" else "实盘",
+                           w["run_id"], w["entry"], h["msg"]))
+
     def tick(self, cfg, is_open):
         watch, positions, syms = self.symbols()
         self.status["symbols"] = len(syms)
@@ -283,6 +303,7 @@ class Monitor(threading.Thread):
                                   (q["high"], p["account"], p["symbol"]))
         if is_open:
             self.evaluate(cfg, quotes, watch, positions, syms)
+            self.check_entry_watch(cfg, quotes)
             if time.time() - self._last_equity >= cfg["monitor"]["equity_snapshot_min"] * 60:
                 for a in ("paper", "live"):
                     broker.record_equity(a, quotes)
