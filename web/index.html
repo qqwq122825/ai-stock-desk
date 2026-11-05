@@ -595,6 +595,7 @@ function emotionCard(g){if(!g||g.error)return `<div class="card"><h3>情绪周�
   const st=g.styles||{},nm={momentum:'情绪短线',swing:'波段'};
   return `<div class="card"><h3>情绪周期 · 热门题材 <span class="mute r">${esc(g.date||'')} · 模拟盘${nm[st.paper]||'波段'} / 实盘${nm[st.live]||'波段'}</span></h3>
   <div class="row"><span class="big" style="color:${col}">${g.stage}</span><span>情绪短线新开仓上限 <b class="num">${Math.round(g.position_cap*100)}%</b></span><span class="mute">${esc(g.tip)}</span></div>
+  ${g.intraday?`<div class="mute" style="font-size:12px;margin-top:4px">⏱ ${esc(g.basis)}（盘中涨停数还没走完，只会往下调，不会往上调）</div>`:''}
   <div class="kv"><div><small>涨停 / 跌停 / 炸板</small><span class="num"><span class="up">${g.zt}</span> / <span class="down">${g.dt}</span> / ${g.zb}</span></div>
    <div><small>炸板率</small><span class="num">${g.zb_rate}%</span></div><div><small>最高连板</small><span class="num">${g.max_lb}</span></div>
    <div><small>昨日涨停今天</small><span class="num ${pc(g.yzt_avg_pct||0)}">${g.yzt_avg_pct==null?'--':sg(g.yzt_avg_pct)+'%'}</span></div></div>

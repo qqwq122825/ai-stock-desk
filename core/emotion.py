@@ -80,13 +80,60 @@ def _last_trade_date():
     return d.strftime("%Y%m%d")
 
 
+def _prev_trade_date(date):
+    """date（YYYYMMDD）之前最近一个有涨停池数据的交易日。"""
+    d = market.datetime.strptime(date, "%Y%m%d")
+    for i in range(1, 10):
+        day = d - market.timedelta(days=i)
+        if day.weekday() >= 5:
+            continue
+        ds = day.strftime("%Y%m%d")
+        try:
+            if pool("zt", ds):
+                return ds
+        except Exception:
+            continue
+    return None
+
+
+def _closing(date):
+    """某个交易日收盘后的完整情绪（优先用已保存的；没有就现算并保存）。"""
+    try:
+        row = db.one("SELECT data FROM emotion_days WHERE date=?", (date,))
+        d = db.jloads(row["data"], {}) if row else {}
+        if d.get("final") and d.get("stage"):
+            return dict(d, date=date)
+    except Exception:
+        pass
+    return sentiment(date)
+
+
 def sentiment(date=None):
-    """市场情绪：阶段 + 关键数字 + 理由。失败返回 {"error": ...}。"""
+    """市场情绪：阶段 + 关键数字 + 理由。失败返回 {"error": ...}。
+
+    盘中（交易日 9:26~15:00）当天的涨停池还没走完，早上 9:35 只有十几家涨停，直接算会误判成「冰点」。
+    所以盘中**以上一个交易日收盘的情绪为准**，当天的数字只用来**往下调**（昨天的涨停今天大面积被砸、跌停很多、
+    炸板率很高），不会因为盘中热闹就往上调。收盘后（15:00 起）才用当天完整数据定今天的阶段，并保存下来给明天用。"""
+    now = market.now()
+    hm = now.hour * 100 + now.minute
+    today = now.strftime("%Y%m%d")
+    if date is None and market.is_trading_day(now) and 926 <= hm < 1500:
+        return _intraday(today, hm)
     try:
         date = date or _last_trade_date()
         zt, zb, dt, yzt = (pool(k, date) for k in ("zt", "zb", "dt", "yzt"))
     except Exception as e:
         return {"error": "情绪数据获取失败：%s" % e}
+    val = _compute(date, zt, zb, dt, yzt)
+    final = date < today or hm >= 1500
+    val["final"] = final
+    val["basis"] = "%s 收盘数据" % date if final else "%s 盘中数据（未收盘）" % date
+    if final:
+        _save_day(date, val)
+    return val
+
+
+def _compute(date, zt, zb, dt, yzt):
     n_zt, n_zb, n_dt = len(zt), len(zb), len(dt)
     zb_rate = n_zb / (n_zt + n_zb) * 100 if n_zt + n_zb else 0
     max_lb = max([r["lbc"] for r in zt] or [0])
@@ -113,12 +160,48 @@ def sentiment(date=None):
         stage = "修复"
     if prev.get("zt"):
         why.append("涨停数较上个交易日 %+d" % (n_zt - prev["zt"]))
-    val = {"date": date, "stage": stage, "position_cap": STAGE_CAPS[stage], "tip": STAGE_TIPS[stage],
-           "zt": n_zt, "dt": n_dt, "zb": n_zb, "zb_rate": round(zb_rate, 1), "max_lb": max_lb,
-           "yzt_avg_pct": round(yzt_avg, 2) if yzt_avg is not None else None, "reasons": why,
-           "themes": hot_themes(zt)[:8]}
-    _save_day(date, val)
-    return val
+    return {"date": date, "stage": stage, "position_cap": STAGE_CAPS[stage], "tip": STAGE_TIPS[stage],
+            "zt": n_zt, "dt": n_dt, "zb": n_zb, "zb_rate": round(zb_rate, 1), "max_lb": max_lb,
+            "yzt_avg_pct": round(yzt_avg, 2) if yzt_avg is not None else None, "reasons": why,
+            "themes": hot_themes(zt)[:8]}
+
+
+def _intraday(today, hm):
+    prev_date = _prev_trade_date(today)
+    base = _closing(prev_date) if prev_date else {"error": "找不到上一个交易日"}
+    if base.get("error"):
+        return base
+    try:
+        zt, zb, dt, yzt = (pool(k, today) for k in ("zt", "zb", "dt", "yzt"))
+    except Exception:
+        zt = zb = dt = yzt = None
+    stage, why = base["stage"], ["以上个交易日（%s）收盘情绪「%s」为准" % (prev_date, base["stage"])]
+    live = None
+    if zt is not None:
+        n_zt, n_zb, n_dt = len(zt), len(zb), len(dt)
+        zb_rate = n_zb / (n_zt + n_zb) * 100 if n_zt + n_zb else 0
+        yzt_avg = sum(r["pct"] for r in yzt) / len(yzt) if yzt else None
+        live = {"zt": n_zt, "dt": n_dt, "zb": n_zb, "zb_rate": round(zb_rate, 1),
+                "max_lb": max([r["lbc"] for r in zt] or [0]),
+                "yzt_avg_pct": round(yzt_avg, 2) if yzt_avg is not None else None}
+        why.append("盘中：涨停%d 跌停%d 炸板率%.0f%%%s" % (n_zt, n_dt, zb_rate,
+                                                 "，昨日涨停今天平均%+.1f%%" % yzt_avg if yzt_avg is not None else ""))
+        # 只往下调：昨天的涨停今天被砸（亏钱效应）、跌停多 → 降级；10 点前数据太少，只看跌停
+        down = None
+        if n_dt >= 20 or (hm >= 1000 and yzt_avg is not None and yzt_avg < -2):
+            down = "冰点"
+        elif hm >= 1000 and ((yzt_avg is not None and yzt_avg < 0) or (hm >= 1030 and n_zt + n_zb >= 20 and zb_rate >= 50)):
+            down = "退潮"
+        if down and STAGE_CAPS[down] < STAGE_CAPS[stage]:
+            why.append("盘中亏钱效应明显，下调为「%s」" % down)
+            stage = down
+    themes = base.get("themes") or []
+    if zt is not None and hm >= 1030:
+        themes = hot_themes(zt)[:8] or themes      # 10:30 以后当天的题材才有参考价值
+    return dict(live or {k: base.get(k) for k in ("zt", "dt", "zb", "zb_rate", "max_lb", "yzt_avg_pct")},
+                date=today, stage=stage, position_cap=STAGE_CAPS[stage], tip=STAGE_TIPS[stage], reasons=why,
+                themes=themes, final=False, intraday=True, prev_stage=base["stage"], prev_date=prev_date,
+                basis="盘中：以 %s 收盘情绪为准，当天数据只往下调" % prev_date)
 
 
 def hot_themes(zt=None, top=10):
@@ -170,6 +253,8 @@ def theme_of(sym, industry=None):
 def _save_day(date, val):
     try:
         keep = {k: val[k] for k in ("stage", "zt", "dt", "zb", "zb_rate", "max_lb", "yzt_avg_pct")}
+        keep.update(final=True, themes=[{x: t[x] for x in ("name", "zt", "max_lb", "leaders", "rank", "heat")}
+                                        for t in val.get("themes") or []])
         db.run("INSERT OR REPLACE INTO emotion_days VALUES(?,?,?)", (date, json.dumps(keep, ensure_ascii=False), time.time()))
     except Exception as e:
         log.debug("保存情绪失败: %s", e)

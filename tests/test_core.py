@@ -64,7 +64,8 @@ news.industry = lambda sym, name="": "半导体" if sym.endswith("000001") else 
 import core.emotion as emotion  # noqa: E402
 REAL_POOL = emotion.pool
 POOLS = {"zt": [], "zb": [], "dt": [], "yzt": []}
-emotion.pool = lambda kind, date=None: list(POOLS[kind])
+POOLS_BY_DATE = {}
+emotion.pool = lambda kind, date=None: list((POOLS_BY_DATE.get(date) or POOLS)[kind])
 emotion._last_trade_date = lambda: market.now().strftime("%Y%m%d")
 import core.global_market as gm  # noqa: E402
 REAL_OVERNIGHT = gm.overnight
@@ -952,6 +953,40 @@ class TestMomentum(Base):
         self.assertEqual(screener.position_cap("paper")["cap"], 0.2)
         REGIME.update(state="强势", position_cap=0.9)              # 大盘强势 90%，情绪修复 50% → 取 50%
         self.assertEqual(screener.position_cap("paper")["cap"], 0.5)
+
+    def _at(self, hhmm, day="2026-11-05"):
+        import datetime as _dt
+        real = emotion.market.now
+        t = _dt.datetime.strptime(day + " " + hhmm, "%Y-%m-%d %H:%M").replace(tzinfo=market.CN_TZ)
+        emotion.market.now = lambda: t
+        self.addCleanup(setattr, emotion.market, "now", real)
+
+    def _day_pools(self, date, **kw):
+        set_pools(**kw)
+        POOLS_BY_DATE[date] = {k: list(v) for k, v in POOLS.items()}
+        self.addCleanup(POOLS_BY_DATE.clear)
+
+    def test_intraday_uses_yesterday_close(self):
+        self._day_pools("20261104")                                   # 昨天收盘：修复
+        self._day_pools("20261105", n_zt=10, n_zb=2)                  # 今天 9:40 才 10 家涨停
+        self._at("09:40")
+        e = emotion.sentiment()
+        self.assertEqual((e["stage"], e["prev_stage"], e["intraday"]), ("修复", "修复", True))   # 不会误判冰点
+        self.assertIsNone(db.one("SELECT 1 FROM emotion_days WHERE date='20261105'"))         # 盘中不保存
+        self.assertTrue(db.one("SELECT 1 FROM emotion_days WHERE date='20261104'"))           # 昨天收盘存下来了
+        self._day_pools("20261105", n_zt=120, n_zb=10, yzt_pct=6, max_lb=7)                   # 盘中很热也不上调
+        emotion._cache.clear()
+        self._at("11:00")
+        self.assertEqual(emotion.sentiment()["stage"], "修复")
+        self._day_pools("20261105", n_zt=40, n_zb=10, yzt_pct=-3)                            # 昨天涨停今天被砸
+        self._at("10:15")
+        self.assertEqual(emotion.sentiment()["stage"], "冰点")
+        self._at("09:50")
+        self.assertEqual(emotion.sentiment()["stage"], "修复")                                # 10 点前只看跌停
+        self._at("15:10")
+        e = emotion.sentiment()
+        self.assertEqual((e["stage"], e["final"]), ("冰点", True))                             # 收盘后用完整数据
+        self.assertTrue(db.one("SELECT 1 FROM emotion_days WHERE date='20261105'"))
 
     def test_style_per_account(self):
         self.assertEqual(config.style("paper"), "momentum")
