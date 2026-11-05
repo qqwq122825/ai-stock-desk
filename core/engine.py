@@ -226,6 +226,11 @@ class Monitor(threading.Thread):
         if not (900 <= t < 930) or getattr(self, "_premarket_day", None) == d or not market.is_trading_day(now):
             return
         self._premarket_day = d
+        t0 = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        # A successful send is recorded by notify.send; failed attempts must not block a retry after restart.
+        if db.one("SELECT 1 FROM messages WHERE title LIKE '盘前外盘%' AND ok=1 AND ts>=? AND ts<? LIMIT 1",
+                  (t0, t0 + 86400)):
+            return
         ov = global_market.overnight(ttl=60)
         if not ov:
             return

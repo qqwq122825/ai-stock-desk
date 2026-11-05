@@ -3,4 +3,4 @@ _to_delete/
 __pycache__/
 *.pyc
 .DS_Store
-/ai-stock-desk.zip
+*.zip

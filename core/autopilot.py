@@ -112,15 +112,31 @@ def status(monitor=None, account="paper"):
 
     def step(name, when, state, note=""):
         return {"name": name, "when": when, "state": state, "note": note}
+    is_open = trading_day and bool(mon.get("market_open"))
+    if not trading_day:
+        phase, phase_note = "off", "今天休市"
+    elif hm < 930:
+        phase, phase_note = "wait", "9:30 开盘后开始"
+    elif 1130 <= hm < 1300:
+        phase, phase_note = "wait", "午休，13:00 继续"
+    elif hm >= 1500:
+        phase, phase_note = "done", "今天已收盘"
+    elif is_open:
+        phase, phase_note = "run", ""
+    else:
+        phase, phase_note = "wait", "等待监控更新"
+
+    pre = db.one("SELECT ts FROM messages WHERE title LIKE '盘前外盘%' AND ok=1 AND ts>=? AND ts<? "
+                 "ORDER BY ts DESC LIMIT 1", (t0, t0 + 86400))
     steps = [
-        step("盘前简报", "09:00", "done" if trading_day and hm >= 930 else ("wait" if trading_day else "off"),
-             "推送隔夜外盘、今日计划"),
+        step("盘前简报", "09:00", "done" if pre else ("wait" if trading_day and hm < 930 else "off"),
+             ("已推送 %s" % _fmt(pre["ts"])[6:]) if pre else
+             ("未记录成功推送" if trading_day and hm >= 930 else "推送隔夜外盘、今日计划")),
         step("AI 巡检决策", "交易时段每 %d 分钟 + 异动唤醒" % iv if iv else "未开启定时",
-             "run" if (llm_on and iv and mon.get("market_open")) else ("wait" if llm_on and iv else "off"),
-             "上次：%s" % _fmt(last_dec["ts"]) if last_dec else "还没有决策"),
-        step("盯盘 · 止损止盈", "交易时段每 %s 秒" % cfg["monitor"]["poll_interval_sec"],
-             "run" if mon.get("market_open") else "wait",
-             "模拟盘自动执行" if cfg["plans"].get("auto_stop_loss_paper", True) else "只推送提醒"),
+             phase if llm_on and iv else "off",
+             (phase_note if llm_on and iv else "") or ("上次：%s" % _fmt(last_dec["ts"]) if last_dec else "还没有决策")),
+        step("盯盘 · 止损止盈", "交易时段每 %s 秒" % cfg["monitor"]["poll_interval_sec"], phase,
+             phase_note or ("模拟盘自动执行" if cfg["plans"].get("auto_stop_loss_paper", True) else "只推送提醒")),
         step("收盘选股 + 委员会", "15:05", "done" if daily_done else ("wait" if trading_day else "off"),
              mon.get("daily") or ("上次选股：%s" % _fmt(last_screen["ts"]) if last_screen else "还没选过")),
     ]
@@ -134,6 +150,6 @@ def status(monitor=None, account="paper"):
         today_cnt["trades_" + a] = db.one("SELECT COUNT(*) n FROM trades WHERE account=? AND ts>=?", (a, t0))["n"]
     today_cnt["pending"] = db.one("SELECT COUNT(*) n FROM orders WHERE account='live' AND status='pending_confirm'")["n"]
     return {"ai_accounts": cfg["ai"]["accounts"], "llm_enabled": llm_on, "llm_model": cfg["ai"].get("llm_model"),
-            "trading_day": trading_day, "market_open": bool(mon.get("market_open")),
+            "phase_note": phase_note, "trading_day": trading_day, "market_open": phase == "run",
             "session": mon.get("session"), "steps": steps, "today": today_cnt,
             "committee_required": cfg["committee"]["required_for_buy"]}

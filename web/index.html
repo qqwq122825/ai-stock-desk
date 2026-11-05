@@ -384,7 +384,7 @@ async function pageCockpit(first){
   }
   const iv=(ap.steps[1]||{}).when||'';
   const st=!on?['paused','已暂停','AI 不自动交易']:!ap.llm_enabled?['paused','未接模型','设置里开启内置大模型']
-    :ap.market_open?['live','巡检中',iv.replace('交易时段','')]:['idle','待命',ap.trading_day?'等待开盘 · 盘后自动选股':'今天休市'];
+    :ap.market_open?['live','巡检中',iv.replace('交易时段','')]:['idle','待命',ap.phase_note||'等待监控更新'];
   $('#orb').className='orb '+st[0];$('#orbT').textContent=st[1];$('#orbS').textContent=st[2];
   $('#hnums').innerHTML=`<small>模拟盘总资产 · 虚拟资金</small><div class="mega">${money(s.equity)}</div>
     <div class="row" style="gap:20px"><span>累计 <b class="num ${pc(s.total_pnl)}">${sg(s.total_pnl)} (${sg(s.total_pnl_pct)}%)</b></span><span>今日 <b class="num ${pc(s.day_pnl)}">${sg(s.day_pnl)} (${sg(s.day_pnl_pct)}%)</b></span></div>
