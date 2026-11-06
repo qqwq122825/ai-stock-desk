@@ -849,6 +849,9 @@ async function pageSettings(){
     <label>PushPlus Token</label>${inp('notify','pushplus_token','password','pushplus.plus 微信扫码获取')}
     <label>Server酱 SendKey</label>${inp('notify','serverchan_key','password','sct.ftqq.com 获取')}
     <label>AI 交易摘要推送</label>${chk('notify','ai_summary')}
+    <label>推送模拟盘动向</label><div class="row">${chk('notify','paper')}<small class="mute">没接实盘时，靠它看系统买了什么、卖了什么、委员会结论</small></div>
+    <label>推送哪些消息</label><div class="row" style="flex-wrap:wrap;gap:6px 14px">${[['trade','成交/订单/止损'],['committee_pass','委员会通过'],['committee_reject','委员会没通过'],['watch','等回踩到价'],['daily','收盘总结'],['premarket','盘前简报'],['alert','盘中异动(很多)'],['ai_note','AI 巡检提醒'],['system','系统']].map(([k,l])=>`<label style="display:inline-flex;gap:4px;align-items:center;color:var(--text)"><input type="checkbox" class="nkind" data-k="${k}" ${((c.notify.kinds||{})[k])?'checked':''}>${l}</label>`).join('')}</div>
+    <span></span><small class="mute">实盘的成交和待确认订单不管怎么勾都会推送。没勾的消息不推，但在「消息」里能查到。</small>
     <span></span><div class="row"><button class="pri" onclick="saveCfg()">保存</button><button onclick="testPush()">发送测试消息</button></div></div></div>
   <div class="card"><h3>微信 ClawBot（聊天窗口）</h3><div id="wxbot"><div class="mute">加载中…</div></div></div>
   <div class="card"><h3>AI 权限</h3><div class="form">
@@ -940,6 +943,7 @@ async function saveCfg(){const p={};document.querySelectorAll('[data-sec]').forE
   p.ai.accounts=[...($('#ai_paper').checked?['paper']:[]),...($('#ai_live').checked?['live']:[])];
   p.universe=p.universe||{};p.universe.boards=[...document.querySelectorAll('.board:checked')].map(x=>x.value);
   p.regime={caps:{}};document.querySelectorAll('.cap').forEach(i=>p.regime.caps[i.dataset.k]=+i.value);
+  if(document.querySelector('.nkind')){p.notify=p.notify||{};p.notify.kinds={};document.querySelectorAll('.nkind').forEach(i=>p.notify.kinds[i.dataset.k]=i.checked)}
   await post('/api/config',p);toast('已保存');status()}
 let WXT=null;
 async function wxbotLoad(){const el=$('#wxbot');if(!el)return;let s;try{s=await api('/api/wechat/status')}catch(e){el.innerHTML='<div class="mute">读取失败</div>';return}

@@ -375,7 +375,9 @@ def run_async(sym, account="paper", intent="open", trigger="auto", then_execute=
             else:
                 from . import notify
                 notify.send("投研委员会#%d：%s %s" % (res["run_id"], res.get("decision"), _name(sym)),
-                            "**%s**  \n%s" % (res.get("summary", ""), "；".join(res.get("gate_notes", []))))
+                            "**%s**  \n%s" % (res.get("summary", ""), "；".join(res.get("gate_notes", []))),
+                            kind="committee_pass" if res.get("status") == "approved" else "committee_reject",
+                            account=account)
         except Exception as e:
             log.error("委员会失败 %s: %s", sym, e)
     t = threading.Thread(target=_go, daemon=True, name="committee-%d" % rid)

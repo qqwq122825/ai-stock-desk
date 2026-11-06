@@ -652,7 +652,9 @@ def apply_decision(dec, agent="external", trigger="timer"):
         if dec.get("notify"):
             lines.append("\n" + str(dec["notify"]))
         title = "AI决策(%s)：%s" % (trigger[:20], "，".join(a["summary"] for a in done)[:60] or "提醒")
-        notify.send(title, "\n".join(lines))
+        accts = {a.get("account") for a in done}
+        notify.send(title, "\n".join(lines), kind="trade" if done else "ai_note",
+                    account="live" if "live" in accts else ("paper" if done else None))
 
     if dec.get("journal"):
         try:

@@ -198,7 +198,7 @@ class Monitor(threading.Thread):
             except Exception as e:
                 log.exception("每日收盘流程失败")
                 self.status["daily"] = "失败：%s" % e
-                notify.send("每日收盘流程失败", str(e))
+                notify.send("每日收盘流程失败", str(e), kind="system")
         threading.Thread(target=go, daemon=True, name="daily-close").start()
 
     def check_restart(self, now):
@@ -220,7 +220,7 @@ class Monitor(threading.Thread):
                 log.error("无法清除重启标记，放弃重启以免循环")
                 return
         log.warning("收到重启请求（%s），正在重启加载新代码…", reason or "无说明")
-        notify.send("系统重启加载新代码", reason or "维护 AI 请求重启")
+        notify.send("系统重启加载新代码", reason or "维护 AI 请求重启", kind="system")
         sys.stdout.flush()
         sys.stderr.flush()
         os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -256,7 +256,7 @@ class Monitor(threading.Thread):
         if linked:
             lines += ["", "**相关持仓/自选：**"] + linked
         lines.append("\n美股影响主要在开盘，注意高开低走/低开高走，不要开盘第一分钟追。")
-        notify.send("盘前外盘：%s" % s["mood"], "\n".join(lines))
+        notify.send("盘前外盘：%s" % s["mood"], "\n".join(lines), kind="premarket")
 
     def check_entry_watch(self, cfg, quotes):
         """委员会说「等回踩到 X 再买」的，到价站稳就自动重开委员会复审。"""
@@ -271,7 +271,7 @@ class Monitor(threading.Thread):
             notify.send("等回踩%s：%s" % ("到价复审" if h["status"] == "hit" else "作废", h["name"]),
                         "**%s %s** 现价 %.3f（%s，委员会#%d 说等回踩 %.3f）  \n%s"
                         % (h["name"], w["symbol"], h["price"], "模拟盘" if w["account"] == "paper" else "实盘",
-                           w["run_id"], w["entry"], h["msg"]))
+                           w["run_id"], w["entry"], h["msg"]), kind="watch", account=w["account"])
 
     def tick(self, cfg, is_open):
         watch, positions, syms = self.symbols()
@@ -399,4 +399,9 @@ class Monitor(threading.Thread):
                 lines.append("\n🤖 已唤醒内置AI调研，决策结果稍后推送")
             if wakeup.trigger(reason, syms):
                 lines.append("\n🤖 已唤醒外部AI调研，决策结果稍后推送")
-        notify.send(title[:90], "\n\n".join(lines))
+        plan = [a for a in alerts if a["src"].startswith("📋")]
+        kind = "trade" if plan else "alert"
+        acct = None
+        if plan:
+            acct = "live" if any("实盘" in a["src"] for a in plan) else "paper"
+        notify.send(title[:90], "\n\n".join(lines), kind=kind, account=acct)

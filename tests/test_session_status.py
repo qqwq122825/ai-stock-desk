@@ -45,7 +45,7 @@ class TestSessionStatus(Base):
         now = self.at(9, 10)
         self.record(self.at(9, 1), False)
         fake_send = notify.send
-        def logged_send(title, content):
+        def logged_send(title, content, **kw):
             self.record(now, True)
             return fake_send(title, content)
         with patch.object(notify, "send", side_effect=logged_send):

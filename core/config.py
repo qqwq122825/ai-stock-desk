@@ -32,6 +32,19 @@ DEFAULTS = {
         # 推送降噪：策略信号只推送买/卖且强度≥此值的；"关注"类信号只记录不推送（AI 照样能看到）
         "min_signal_strength": 0.6,
         "push_watch_signals": False,
+        # 推送哪些消息（实盘的成交/待确认订单永远推送；其他按下面勾选）
+        "paper": True,                  # 推送模拟盘的动向（没接实盘时靠它看系统在干什么）
+        "kinds": {
+            "trade": True,              # 买入/卖出成交、止损止盈自动卖、实盘待确认订单
+            "committee_pass": True,     # 投研委员会通过
+            "committee_reject": False,  # 投研委员会没通过
+            "watch": True,              # 等回踩到价复审 / 作废
+            "daily": True,              # 收盘选股 + 委员会总结
+            "premarket": True,          # 盘前外盘简报
+            "alert": False,             # 盘中异动、策略信号（很多，默认不推）
+            "ai_note": False,           # AI 巡检没交易时的提醒
+            "system": True,             # 系统重启、流程失败
+        },
     },
     "paper": {
         "initial_cash": 10000,

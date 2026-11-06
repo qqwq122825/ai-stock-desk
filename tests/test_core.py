@@ -83,7 +83,7 @@ gm.overnight = lambda ttl=600: fake_ov()
 import core.notify as notify  # noqa: E402
 SENT = []
 REAL_NOTIFY_SEND = notify.send
-notify.send = lambda t, c: (SENT.append((t, c)) or (True, "test"))
+notify.send = lambda t, c, **kw: (SENT.append((t, c)) or (True, "test"))
 agent.notify.send = notify.send
 
 
@@ -364,7 +364,7 @@ class TestGlobal(Base):
         sent = []
         old_send = notify.send
         self.addCleanup(setattr, notify, "send", old_send)
-        notify.send = lambda t, c: (sent.append(c) or (True, "t"))
+        notify.send = lambda t, c, **kw: (sent.append(c) or (True, "t"))
 
         class Fake:
             label = "测试"
@@ -1198,6 +1198,20 @@ class TestWechatBot(Base):
         st = wb._load(); st["pushes"] = 9; wb._save(st)
         ok, ch = REAL_NOTIFY_SEND("止损", "卖了")
         self.assertIn("额度用完", ch)
+
+    def test_push_kinds_and_paper_switch(self):
+        config.save_config({"notify": {"enabled": True, "pushplus_token": ""}})
+        self.assertTrue(notify.wanted("trade", "paper"))
+        self.assertFalse(notify.wanted("alert", None))                       # 盘中异动默认不推
+        self.assertFalse(notify.wanted("committee_reject", "paper"))
+        config.save_config({"notify": {"paper": False}})
+        self.assertFalse(notify.wanted("trade", "paper"))                    # 关掉模拟盘推送
+        self.assertTrue(notify.wanted("trade", "live"))                      # 实盘成交/订单永远推
+        self.assertTrue(notify.wanted("system", None))
+        ok, why = REAL_NOTIFY_SEND("模拟盘买入", "x", kind="trade", account="paper")
+        self.assertFalse(ok)
+        self.assertIn("按设置不推送", why)
+        self.assertEqual(db.one("SELECT channels FROM messages ORDER BY id DESC LIMIT 1")["channels"], why)
 
     def test_qr_svg(self):
         self.assertTrue(self.wb.qr_svg("https://liteapp.weixin.qq.com/q/abc?qrcode=x").startswith("<svg"))

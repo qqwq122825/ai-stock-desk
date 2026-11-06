@@ -31,7 +31,7 @@ def run_daily_close(progress=None, force=False, accounts=None):
         except Exception as e:
             log.exception("收盘流程失败 %s", a)
             r = {"error": str(e), "approved": [], "reviewed": []}
-            notify.send("收盘流程失败（%s）" % ("实盘" if a == "live" else "模拟盘"), str(e))
+            notify.send("收盘流程失败（%s）" % ("实盘" if a == "live" else "模拟盘"), str(e), kind="system")
         out["accounts"][a] = r
         out["approved"] += r.get("approved", [])
         out["reviewed"] += r.get("reviewed", [])
@@ -124,7 +124,8 @@ def _close_one(account, progress=None):
     if emo.get("themes"):
         lines.append("\n🔥 热门题材：" + "、".join("%s(%d家涨停)" % (t["name"], t["zt"]) for t in emo["themes"][:5]))
     lines.append("\n选股前5：" + "、".join("%s(%.1f)" % (c["name"], c["score"]) for c in cands[:5]))
-    notify.send(an + "收盘总结：%s，通过%d只" % (regime.get("state"), len(summary["approved"])), "\n".join(lines))
+    notify.send(an + "收盘总结：%s，通过%d只" % (regime.get("state"), len(summary["approved"])), "\n".join(lines),
+                kind="daily", account=account)
     try:
         from . import agent
         agent.journal_append("【每日收盘自动·" + an + " %s】大盘%s；送审%d只，通过：%s；未通过：%s" % (
