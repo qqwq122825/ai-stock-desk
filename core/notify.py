@@ -1,4 +1,4 @@
-"""微信推送：PushPlus / Server酱（两个都配就都发）。"""
+"""微信推送：优先发到微信 ClawBot 对话框（core/wechat_bot.py）；没绑定 / 会话过期 / 额度用完时退回 PushPlus / Server酱。"""
 import json
 import logging
 import time
@@ -27,6 +27,18 @@ def send(title, content):
     """content 支持 markdown。返回 (ok, 渠道说明)。失败不抛异常。"""
     cfg = load_config()["notify"]
     channels, ok = [], False
+    via_bot = False
+    if cfg.get("enabled"):
+        try:
+            from . import wechat_bot
+            via_bot, info = wechat_bot.push(title, content)
+            if info != "未绑定":
+                channels.append("clawbot:%s" % info)
+            ok = ok or via_bot
+            if via_bot and not wechat_bot.cfg()["also_pushplus"]:
+                cfg = dict(cfg, pushplus_token="", serverchan_key="")       # 已经发到微信对话框了，不再重复
+        except Exception as e:
+            channels.append("clawbot:err %s" % e)
     if cfg.get("enabled"):
         if cfg.get("pushplus_token"):
             try:

@@ -82,6 +82,7 @@ def fake_ov(**pcts):
 gm.overnight = lambda ttl=600: fake_ov()
 import core.notify as notify  # noqa: E402
 SENT = []
+REAL_NOTIFY_SEND = notify.send
 notify.send = lambda t, c: (SENT.append((t, c)) or (True, "test"))
 agent.notify.send = notify.send
 
@@ -1137,6 +1138,69 @@ class TestEntryWatch(Base):
         self.assertEqual(watch.active(), [])
         self._wait_run(entry=10.2, stop=10.5)                              # 止损高于入场价：不登记
         self.assertEqual(watch.active(), [])
+
+
+class TestWechatBot(Base):
+    """微信 ClawBot：只认绑定的人、主动提醒额度和 24 小时会话、命令、退回 PushPlus。"""
+
+    def setUp(self):
+        super().setUp()
+        from core import wechat_bot
+        self.wb = wechat_bot
+        self.sent = []
+        real = wechat_bot._req
+
+        def fake_req(method, base, path, body=None, token=None, timeout=15):
+            self.sent.append((path, body))
+            return {"ret": 0}
+        wechat_bot._req = fake_req
+        self.addCleanup(setattr, wechat_bot, "_req", real)
+        wechat_bot._save({"bot_token": "t", "user_id": "me@im.wechat", "context_token": None, "last_user_ts": 0,
+                          "pushes": 0})
+        self.addCleanup(wechat_bot.unbind)
+
+    def _msg(self, text, sender="me@im.wechat"):
+        return {"message_type": 1, "from_user_id": sender, "context_token": "ctx1",
+                "item_list": [{"type": 1, "text_item": {"text": text}}]}
+
+    def test_push_needs_session_and_quota(self):
+        wb = self.wb
+        self.assertEqual(wb.push("t", "c")[0], False)                # 你还没说过话：不能主动发
+        wb._on_message(self._msg("帮助"))
+        self.assertIn("持仓", self.sent[-1][1]["msg"]["item_list"][0]["text_item"]["text"])
+        self.assertEqual(self.sent[-1][1]["msg"]["context_token"], "ctx1")
+        for i in range(9):
+            self.assertTrue(wb.push("提醒%d" % i, "**内容**")[0])
+        self.assertIn("最后一条", self.sent[-1][1]["msg"]["item_list"][0]["text_item"]["text"])
+        self.assertNotIn("**", self.sent[-1][1]["msg"]["item_list"][0]["text_item"]["text"])
+        self.assertEqual(wb.push("第10条", "c"), (False, "主动消息额度用完（9 条）"))
+        wb._on_message(self._msg("在"))                               # 说一句就重新计数
+        st = wb._load(); st["last_user_ts"] = time.time() - 25 * 3600; wb._save(st)
+        self.assertIn("会话过期", wb.push("t", "c")[1])
+
+    def test_only_owner_and_commands(self):
+        wb = self.wb
+        n = len(self.sent)
+        wb._on_message(self._msg("持仓", sender="stranger@im.wechat"))
+        self.assertEqual(len(self.sent), n)                          # 陌生人的消息不理
+        self.assertIn("模拟盘", wb.respond("持仓"))
+        self.assertIn("没有待确认", wb.respond("订单"))
+        self.assertIn("处理失败", wb.respond("确认 999"))
+        self.assertIn("大模型没开", wb.respond("今天为什么没买"))
+
+    def test_notify_prefers_clawbot_then_pushplus(self):
+        wb = self.wb
+        config.save_config({"notify": {"enabled": True, "pushplus_token": ""}})
+        wb._on_message(self._msg("在"))
+        ok, ch = REAL_NOTIFY_SEND("止损", "卖了")
+        self.assertTrue(ok)
+        self.assertIn("clawbot:ok(1/9)", ch)
+        st = wb._load(); st["pushes"] = 9; wb._save(st)
+        ok, ch = REAL_NOTIFY_SEND("止损", "卖了")
+        self.assertIn("额度用完", ch)
+
+    def test_qr_svg(self):
+        self.assertTrue(self.wb.qr_svg("https://liteapp.weixin.qq.com/q/abc?qrcode=x").startswith("<svg"))
 
 
 def tearDownModule():

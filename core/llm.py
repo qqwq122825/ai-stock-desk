@@ -31,9 +31,10 @@ def _prompt():
         return "你是A股交易决策助手，只输出 JSON 决策。"
 
 
-def chat(messages, cfg):
-    body = {"model": cfg["llm_model"], "messages": messages, "temperature": 0.3,
-            "response_format": {"type": "json_object"}}
+def chat(messages, cfg, json_mode=True):
+    body = {"model": cfg["llm_model"], "messages": messages, "temperature": 0.3}
+    if json_mode:
+        body["response_format"] = {"type": "json_object"}
     req = urllib.request.Request(cfg["llm_base_url"].rstrip("/") + "/chat/completions",
                                  data=json.dumps(body).encode("utf-8"),
                                  headers={"Content-Type": "application/json",

@@ -850,6 +850,7 @@ async function pageSettings(){
     <label>Server酱 SendKey</label>${inp('notify','serverchan_key','password','sct.ftqq.com 获取')}
     <label>AI 交易摘要推送</label>${chk('notify','ai_summary')}
     <span></span><div class="row"><button class="pri" onclick="saveCfg()">保存</button><button onclick="testPush()">发送测试消息</button></div></div></div>
+  <div class="card"><h3>微信 ClawBot（聊天窗口）</h3><div id="wxbot"><div class="mute">加载中…</div></div></div>
   <div class="card"><h3>AI 权限</h3><div class="form">
     <label>作用于模拟盘</label><input type="checkbox" id="ai_paper" ${c.ai.accounts.includes('paper')?'checked':''}>
     <label>作用于实盘</label><div><input type="checkbox" id="ai_live" ${c.ai.accounts.includes('live')?'checked':''}> <small class="mute">实盘只生成待确认订单，必须你点确认</small></div>
@@ -916,6 +917,7 @@ async function pageSettings(){
     <label>行情刷新(秒)</label>${inp('monitor','poll_interval_sec','number')}
     <label>记录秒级tick</label>${chk('monitor','record_ticks')}
     <span></span><button class="pri" onclick="saveCfg()">保存</button></div><p class="mute"><small>修改 host/port 需编辑 data/config.json 后重启</small></p></div></div>`;
+  wxbotLoad();
 }
 // 模型下拉框：预设 + 自定义（隐藏的 input 才是真正保存的字段）
 const MODELS=[['deepseek-flash','DeepSeek V4.1 Flash（推荐·快·便宜）','https://api.deepseek.com'],
@@ -939,6 +941,27 @@ async function saveCfg(){const p={};document.querySelectorAll('[data-sec]').forE
   p.universe=p.universe||{};p.universe.boards=[...document.querySelectorAll('.board:checked')].map(x=>x.value);
   p.regime={caps:{}};document.querySelectorAll('.cap').forEach(i=>p.regime.caps[i.dataset.k]=+i.value);
   await post('/api/config',p);toast('已保存');status()}
+let WXT=null;
+async function wxbotLoad(){const el=$('#wxbot');if(!el)return;let s;try{s=await api('/api/wechat/status')}catch(e){el.innerHTML='<div class="mute">读取失败</div>';return}
+  const L=s.login||{};clearTimeout(WXT);
+  if(s.bound){el.innerHTML=`<div class="form"><label>状态</label><div>✅ 已绑定（${esc(s.bound_at||'')}）${s.running?'':' <span class="down">收消息线程没在跑</span>'}</div>
+    <label>会话剩余</label><div>${s.session_left_hours==null?'还没收到你的消息：请先在微信里给它发一句「帮助」':(s.session_left_hours>0?s.session_left_hours+' 小时（你上次说话 '+esc(s.last_user_msg)+'）':'<span class="up">已过期，提醒改走 PushPlus；在微信里回一句就恢复</span>')}</div>
+    <label>主动提醒</label><div>本轮已用 ${s.pushes_used}/${s.max_push} 条（你每说一句话就重新计数）</div>
+    ${s.last_error?`<label>最近问题</label><div class="mute">${esc(s.last_error)}</div>`:''}
+    <span></span><div class="row"><button onclick="wxbotTest()">发测试提醒</button><button class="red" onclick="wxbotUnbind()">解绑</button></div></div>
+    <p class="mute"><small>在微信里可以发：持仓、订单、确认 12、拒绝 12、审 600519，或直接提问。微信规定：你 24 小时不说话，机器人就不能主动发消息；你每说一句话后最多主动发 10 条（这里用 9 条）。发不了时自动改走 PushPlus。</small></p>`;return}
+  el.innerHTML=`<div style="padding:4px 2px">
+    ${L.qr_svg?`<div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap"><div style="width:200px;height:200px;background:#fff;border-radius:8px;padding:6px">${L.qr_svg}</div>
+      <div><b>用 iPhone 微信扫这个码</b><div class="mute" style="margin:6px 0">${esc(L.message||'')}</div>
+      ${L.status=='need_verifycode'?`<div class="row"><input id="wxcode" placeholder="手机上显示的数字" style="width:140px"><button class="pri" onclick="wxbotVerify()">提交</button></div>`:''}</div></div>`
+    :`<div class="mute" style="margin-bottom:8px">${esc(L.message||'还没绑定。绑定后微信里会多一个对话框：系统提醒发到这里，你也能直接提问、确认订单。')}</div>
+      <button class="pri" onclick="wxbotLogin()">绑定微信</button>`}
+    <p class="mute"><small>需要 iPhone 微信 8.0.70 以上：「我 → 设置 → 插件 → ClawBot」能看到才能用。只有扫码的这个微信号能跟系统对话。</small></p></div>`;
+  if(L.qr_svg||L.status=='scaned')WXT=setTimeout(wxbotLoad,2500)}
+async function wxbotLogin(){await post('/api/wechat/login');wxbotLoad()}
+async function wxbotVerify(){await post('/api/wechat/verify',{code:$('#wxcode').value});toast('已提交');wxbotLoad()}
+async function wxbotUnbind(){if(!confirm('解绑后提醒改走 PushPlus，确定？'))return;await post('/api/wechat/unbind');wxbotLoad()}
+async function wxbotTest(){const r=await post('/api/wechat/test');toast((r.ok?'✅ 已发到微信 ':'❌ ')+esc(r.info))}
 async function testPush(){await saveCfg();const r=await post('/api/notify/test');toast((r.ok?'✅ ':'❌ ')+esc(r.channels))}
 async function resetPaper(){if(!confirm('清空模拟盘所有持仓和成交记录？'))return;await post('/api/accounts/paper/reset',{cash:+$('#rcash').value});toast('已重置')}
 async function syncLive(){const r=await post('/api/accounts/live/sync');toast(esc(r.message))}

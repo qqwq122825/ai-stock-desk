@@ -261,6 +261,41 @@ def api_cfg(q, body):
     return config.masked_config()
 
 
+@route("GET", "/api/wechat/status")
+def api_wechat_status(q, body):
+    from core import wechat_bot
+    st = wechat_bot.status()
+    st["login"] = wechat_bot.login_status()
+    return st
+
+
+@route("POST", "/api/wechat/login")
+def api_wechat_login(q, body):
+    from core import wechat_bot
+    return wechat_bot.login_start()
+
+
+@route("POST", "/api/wechat/verify")
+def api_wechat_verify(q, body):
+    from core import wechat_bot
+    wechat_bot.set_verify_code(body.get("code", ""))
+    return {"ok": True}
+
+
+@route("POST", "/api/wechat/unbind")
+def api_wechat_unbind(q, body):
+    from core import wechat_bot
+    wechat_bot.unbind()
+    return {"ok": True}
+
+
+@route("POST", "/api/wechat/test")
+def api_wechat_test(q, body):
+    from core import wechat_bot
+    ok, info = wechat_bot.push("测试", "这是一条测试提醒 ✅ 回我「帮助」看看能做什么")
+    return {"ok": ok, "info": info}
+
+
 @route("POST", "/api/config")
 def api_cfg_save(q, body):
     config.save_config(body)
@@ -613,6 +648,11 @@ def main():
     if not args.no_monitor:
         MONITOR = Monitor()
         MONITOR.start()
+        try:
+            from core import wechat_bot
+            wechat_bot.start()
+        except Exception as e:
+            log.warning("微信 ClawBot 启动失败: %s", e)
     srv = ThreadingHTTPServer((host, port), Handler)
     log.info("网页控制台: http://%s:%d", "127.0.0.1" if host == "0.0.0.0" else host, port)
     try:

@@ -1,5 +1,14 @@
 # 变更记录
 
+## 2026-11-06 · Claude · 微信 ClawBot 聊天窗口
+- 新增 `core/wechat_bot.py`：接微信官方「插件 → ClawBot」（iLink 接口，按腾讯开源 MIT 插件 @tencent-weixin/openclaw-weixin 2.4.10 的协议实现，不装 OpenClaw、零依赖）
+- 设置页「微信 ClawBot」：扫码绑定（支持输入手机显示的数字）、状态、测试、解绑；二维码用内置的 `core/qrcodegen.py`（Nayuki，MIT，原样内置）
+- 微信里可以：持仓/状态、订单、确认 N / 拒绝 N（实盘待确认订单）、审 代码（只审不买）、直接提问（DeepSeek 按系统数据回答，不能下单）
+- 推送：notify.send 优先发 ClawBot；没绑定 / 24 小时没说话会话过期 / 9 条主动消息额度用完时退回 PushPlus（微信限制：用户说一句话后最多主动 10 条）
+- 只接受绑定时扫码的那个微信号；bot_token 存在 data/wechat_bot.json（不进 git）
+- `llm.chat` 加 json_mode 参数（聊天回答用普通文本）
+- 验证：71 个离线测试（新增 4 个）；本地实测能拿到绑定二维码
+
 ## 2026-11-05 · Claude · 等回踩自动复审 + 风控官否决理由收窄（经用户同意）
 - 委员会结论 wait 且给了入场价 entry_max 和止损时，登记「等回踩」（新表 entry_watch），有效期 3 个交易日：
   回踩型到入场价附近且从当天低点拉回 ≥0.5%、突破型站上突破价且不超过 1%（10:00 后判断）→ 自动重开委员会复审，通过才买（实盘仍是待确认订单）；
