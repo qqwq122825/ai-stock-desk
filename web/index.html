@@ -856,18 +856,18 @@ async function pageSettings(){
   const inp=(sec,k,type='text',ph='')=>`<input type="${type}" data-sec="${sec}" data-k="${k}" value="${esc(c[sec][k])}" placeholder="${ph}">`;
   const chk=(sec,k)=>`<input type="checkbox" data-sec="${sec}" data-k="${k}" ${c[sec][k]?'checked':''}>`;
   $('#app').innerHTML=`<div class="grid g2">
-  <div class="card"><h3>微信 ClawBot（聊天窗口）</h3><div id="wxbot"><div class="mute">加载中…</div></div>
-   <div class="form" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line)">
+  ${(()=>{const A=(c.notify.accounts||{})[ACCT]||{},K=A.kinds||{},nm=ACCT=='live'?'实盘':'模拟盘';
+   return `<div class="card" style="grid-column:1/-1"><h3>微信 ClawBot · 推送</h3>
+   <div class="grid g2" style="gap:18px;align-items:start">
+    <div><div class="mute" style="font-size:12px;margin-bottom:6px">🤖 机器人（模拟盘、实盘共用）</div><div id="wxbot"><div class="mute">加载中…</div></div></div>
+    <div><div class="mute" style="font-size:12px;margin-bottom:6px">📬 推送什么</div><div class="form">
     <label>推送总开关</label>${chk('notify','enabled')}
     <label>通用消息</label><div class="row" style="flex-wrap:wrap;gap:6px 14px">${[['news_major','重大新闻(每天≤5条)'],['premarket','盘前简报'],['system','系统'],['alert','自选/观察池异动(很多)'],['ai_note','AI 巡检提醒']].map(([k,l])=>`<label style="display:inline-flex;gap:4px;align-items:center;color:var(--text)"><input type="checkbox" class="nkind" data-k="${k}" ${((c.notify.kinds||{})[k])?'checked':''}>${l}</label>`).join('')}</div>
-    <span></span><small class="mute">机器人模拟盘和实盘共用；每个账户推送什么在「推送内容」里分开设置。${c.notify.pushplus_token?'微信会话过期（24 小时没说话）或额度用完时，会用之前配置的 PushPlus 兜底。':''}</small>
-    <span></span><div class="row"><button class="pri" onclick="saveCfg()">保存</button></div></div></div>
-  ${(()=>{const A=(c.notify.accounts||{})[ACCT]||{},K=A.kinds||{},nm=ACCT=='live'?'实盘':'模拟盘';
-   return `<div class="card"><h3>推送内容 · ${nm}</h3><div class="form">
     <label>推送${nm}的动向</label><div class="row"><input type="checkbox" id="acct_push_on" ${A.enabled!==false?'checked':''}><small class="mute">${ACCT=='live'?'实盘的成交和待确认订单不管怎么设都会推送':'没接实盘时，靠它看系统买了什么、卖了什么、委员会结论'}</small></div>
     <label>推送哪些</label><div class="row" style="flex-wrap:wrap;gap:6px 14px">${[['trade',ACCT=='live'?'买卖成交/订单/止损(必推)':'买卖成交/止损'],['committee_pass','委员会通过'],['alert_held','持仓股异动'],['news_held','持仓股新闻公告'],['watch','等回踩到价'],['daily','收盘总结'],['weekly','周五周报'],['committee_reject','委员会没通过']].map(([k,l])=>`<label style="display:inline-flex;gap:4px;align-items:center;color:var(--text)"><input type="checkbox" class="akind" data-k="${k}" ${K[k]!==false?'checked':''} ${ACCT=='live'&&k=='trade'?'disabled checked':''}>${l}</label>`).join('')}</div>
-    <span></span><small class="mute">这里只改${nm}。切换右上角「模拟盘 / 实盘」可以设置另一个。没勾的消息不推，但在「消息」里能查到。</small>
-    <span></span><div class="row"><button class="pri" onclick="saveCfg()">保存</button></div></div></div>`})()}
+    <span></span><small class="mute">通用消息两个账户共用；「${nm}」那两行只改${nm}，切换右上角「模拟盘 / 实盘」可以设置另一个。${c.notify.pushplus_token?'微信会话过期或额度用完时用 PushPlus 兜底。':''}</small>
+    <span></span><div class="row"><button class="pri" onclick="saveCfg()">保存</button></div></div></div>
+   </div></div>`})()}
   <div class="card"><h3>AI 权限</h3><div class="form">
     <label>作用于模拟盘</label><input type="checkbox" id="ai_paper" ${c.ai.accounts.includes('paper')?'checked':''}>
     <label>作用于实盘</label><div><input type="checkbox" id="ai_live" ${c.ai.accounts.includes('live')?'checked':''}> <small class="mute">实盘只生成待确认订单，必须你点确认</small></div>
