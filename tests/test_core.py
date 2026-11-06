@@ -1276,7 +1276,10 @@ class TestReviewAndHousekeeping(Base):
         self.assertTrue(os.path.exists(r["backup"]["path"]))
         import zipfile
         self.assertIn("stock.db", zipfile.ZipFile(r["backup"]["path"]).namelist())
-        self.assertEqual(r["cleanup"]["tick_days"], 1)
+        self.assertEqual(r["cleanup"]["tick_days"], 0)                         # 默认不清理
+        self.assertTrue(os.path.exists(tick_old))
+        config.save_config({"housekeeping": {"tick_keep_days": 30}})          # 设了天数才清理
+        self.assertEqual(housekeeping.cleanup()["tick_days"], 1)
         self.assertFalse(os.path.exists(tick_old))
         for k in range(10):                                                    # 只留 7 份
             housekeeping.backup(now=time.time() - k * 86400)

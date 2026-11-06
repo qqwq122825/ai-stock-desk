@@ -137,6 +137,8 @@ DEFAULTS = {
         "default_stop_pct": -7,         # 计划未给止损时的默认止损（波段）
         "default_max_hold_days": 20,    # 时间止损：持有超过N天且收益<3% 提醒
     },
+    # 每日维护（收盘流程后）：备份 data；清理默认关闭（0 = 永久保留），要清理在这里改天数
+    "housekeeping": {"backup_keep": 7, "tick_keep_days": 0, "committee_keep_days": 0},
     # 微信 ClawBot（微信 → 设置 → 插件 → ClawBot）：绑定后提醒优先发到微信对话框，也能在微信里问问题、确认订单
     "wechat_bot": {"enabled": True, "max_push": 9, "also_pushplus": False},
     # 打法：swing=波段（看趋势/基本面，拿几天到几周）；momentum=情绪短线（跟热门题材，卖得比别人快）
