@@ -1165,7 +1165,7 @@ class TestWechatBot(Base):
 
     def test_push_needs_session_and_quota(self):
         wb = self.wb
-        self.assertEqual(wb.push("t", "c")[0], False)                # 你还没说过话：不能主动发
+        self.assertIn("还没收到你的消息", wb.push("t", "c")[1])          # 你还没说过话：不能主动发
         wb._on_message(self._msg("帮助"))
         self.assertIn("持仓", self.sent[-1][1]["msg"]["item_list"][0]["text_item"]["text"])
         self.assertEqual(self.sent[-1][1]["msg"]["context_token"], "ctx1")
@@ -1204,17 +1204,83 @@ class TestWechatBot(Base):
         self.assertTrue(notify.wanted("trade", "paper"))
         self.assertFalse(notify.wanted("alert", None))                       # 盘中异动默认不推
         self.assertFalse(notify.wanted("committee_reject", "paper"))
-        config.save_config({"notify": {"paper": False}})
+        config.save_config({"notify": {"accounts": {"paper": {"enabled": False}}}})
         self.assertFalse(notify.wanted("trade", "paper"))                    # 关掉模拟盘推送
+        self.assertTrue(notify.wanted("committee_pass", "live"))             # 实盘不受影响
+        config.save_config({"notify": {"accounts": {"live": {"kinds": {"trade": False, "daily": False}}}}})
         self.assertTrue(notify.wanted("trade", "live"))                      # 实盘成交/订单永远推
+        self.assertFalse(notify.wanted("daily", "live"))
         self.assertTrue(notify.wanted("system", None))
         ok, why = REAL_NOTIFY_SEND("模拟盘买入", "x", kind="trade", account="paper")
         self.assertFalse(ok)
         self.assertIn("按设置不推送", why)
         self.assertEqual(db.one("SELECT channels FROM messages ORDER BY id DESC LIMIT 1")["channels"], why)
 
+    def test_news_watch(self):
+        from core import news_watch
+        now = market.now()
+        ts = now.strftime("%Y-%m-%d %H:%M:%S")
+        old = (news.announcements, news.flash_news)
+        self.addCleanup(lambda: (setattr(news, "announcements", old[0]), setattr(news, "flash_news", old[1])))
+        news.announcements = lambda sym, n=5: [{"time": now.strftime("%Y-%m-%d %H:%M"), "title": "关于股东减持计划的公告",
+                                                "tag": "利空", "type": "减持"},
+                                               {"time": "2020-01-01 09:00", "title": "很久以前的公告", "tag": "中性"}]
+        news.flash_news = lambda n=50: [
+            {"id": 1, "time": now.strftime("%m-%d %H:%M"), "ts_full": ts, "tags": ["焦点"], "text": "央行宣布降准0.5个百分点"},
+            {"id": 2, "time": now.strftime("%m-%d %H:%M"), "ts_full": ts, "tags": ["焦点"], "text": "某明星演唱会门票售罄"},
+            {"id": 3, "time": now.strftime("%m-%d %H:%M"), "ts_full": ts, "tags": [], "text": "长江电力签订重大合同"}]
+        pos = [{"symbol": "sh600900", "name": "长江电力", "account": "paper"}]
+        items = news_watch.scan(pos)
+        kinds = sorted((i["kind"], i.get("account")) for i in items)
+        self.assertEqual(kinds, [("news_held", "paper"), ("news_held", "paper"), ("news_major", None)])
+        self.assertTrue(any("降准" in i["title"] for i in items))
+        self.assertEqual(news_watch.scan(pos), [])                              # 同一条只推一次
+
     def test_qr_svg(self):
         self.assertTrue(self.wb.qr_svg("https://liteapp.weixin.qq.com/q/abc?qrcode=x").startswith("<svg"))
+
+
+class TestReviewAndHousekeeping(Base):
+    def test_outcomes_and_check(self):
+        from core import review
+        real = market.get_kline
+        self.addCleanup(setattr, market, "get_kline", real)
+        t0 = time.time() - 10 * 86400
+        d0 = market.datetime.fromtimestamp(t0, market.CN_TZ)
+        days = [(d0 + market.timedelta(days=k)).strftime("%Y-%m-%d") for k in range(0, 9)]
+        up = [{"t": d, "o": 10, "c": 10 * (1 + 0.03 * k), "h": 10 * (1 + 0.04 * k), "l": 9.9} for k, d in enumerate(days)]
+        dn = [{"t": d, "o": 10, "c": 10 * (1 - 0.02 * k), "h": 10.05, "l": 10 * (1 - 0.03 * k)} for k, d in enumerate(days)]
+        market.get_kline = lambda sym, period="day", count=60: up if sym == "sz000001" else dn
+        for sym, st, dec in (("sz000001", "rejected", "pass"), ("sz000002", "rejected", "wait"), ("sz000003", "approved", "buy")):
+            db.run("INSERT INTO committee_runs(ts,symbol,name,account,status,decision,price) VALUES(?,?,?,?,?,?,?)",
+                   (t0, sym, sym, "paper", st, dec, 10.0))
+        o = review.outcomes("paper", 30)
+        self.assertEqual(o["stats"]["rejected"]["n"], 1)
+        self.assertAlmostEqual(o["stats"]["rejected"]["avg_ret3"], 9.0)
+        self.assertEqual([r["symbol"] for r in o["missed"]], ["sz000001"])      # 被否后 5 天内涨超 8%
+        self.assertEqual([r["symbol"] for r in o["dodged"]], ["sz000002"])      # 被否后跌了 5%+
+        self.assertIn("样本还不够", o["verdict"])
+        c = review.paper_check("paper")
+        self.assertFalse(c["ready"])
+        self.assertEqual(len(c["checks"]), 5)
+        title, content = review.weekly_text("paper")
+        self.assertIn("委员会事后对账", content)
+        self.assertIn("模拟盘体检", content)
+
+    def test_backup_and_cleanup(self):
+        from core import housekeeping
+        tick_old = os.path.join(config.DATA_DIR, "ticks", "20000101")
+        os.makedirs(tick_old, exist_ok=True)
+        open(os.path.join(tick_old, "x.csv"), "w").close()
+        r = housekeeping.daily()
+        self.assertTrue(os.path.exists(r["backup"]["path"]))
+        import zipfile
+        self.assertIn("stock.db", zipfile.ZipFile(r["backup"]["path"]).namelist())
+        self.assertEqual(r["cleanup"]["tick_days"], 1)
+        self.assertFalse(os.path.exists(tick_old))
+        for k in range(10):                                                    # 只留 7 份
+            housekeeping.backup(now=time.time() - k * 86400)
+        self.assertEqual(len([f for f in os.listdir(housekeeping.BACKUP_DIR) if f.endswith(".zip")]), 7)
 
 
 def tearDownModule():

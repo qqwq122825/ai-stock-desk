@@ -410,7 +410,19 @@ async function pageBook(){
    <div class="card"><h3>🎯 当前持仓（${s.positions.length}）</h3>${posCards(s,pl.active.filter(p=>p.account=='paper'),'paper')}</div>
    <div class="grid g2" style="margin-top:14px"><div class="card"><h3>🏁 已结束的波段</h3><div class="list">${closed.map(c=>`<div class="row"><b>${esc(c.name)}</b><small class="mute">${c.symbol} · 持有 ${(c.outcome||{}).held_days??'-'} 天 · 卖出价 ${f2((c.outcome||{}).exit_price,3)}</small>
       ${c.run_id?`<a class="tag" href="#committee" onclick="CUR_RUN=${c.run_id}">委员会#${c.run_id}</a>`:''}<span class="r big2 ${pc(rp(c))}" style="font-size:16px">${sg(rp(c))} <small>(${sg((c.outcome||{}).return_pct)}%)</small></span></div>`).join('')||'<div class="empty">还没有完整的一次买卖</div>'}</div></div>
-    <div class="card"><h3>🧾 成交流水</h3>${tradeTable(ts)}</div></div>`;
+    <div class="card"><h3>🧾 成交流水</h3>${tradeTable(ts)}</div></div>
+   <div class="grid g2" style="margin-top:14px"><div class="card"><h3>🩺 能不能上实盘 <span class="mute r">模拟盘体检</span></h3><div id="rvCheck" class="mute">计算中…</div></div>
+    <div class="card"><h3>🔍 委员会事后对账 <span class="mute r">近 30 天，被否的票后来怎么样了</span></h3><div id="rvOut" class="mute">计算中…</div></div></div>`;
+  api('/api/review?account=paper').then(r=>{if(page!='book')return;const k=r.check,o=r.outcomes,st=o.stats;
+    $('#rvCheck').innerHTML=`<div style="margin-bottom:8px"><b class="${k.ready?'up':''}">${esc(k.advice)}</b></div>${k.checks.map(c=>`<div class="row"><span>${c.ok?'✅':'⬜'} ${esc(c.name)}</span><span class="r num">${esc(c.value)}</span></div>`).join('')}
+      ${k.closed?`<div class="mute" style="margin-top:6px">胜率 ${k.win_rate}% · 平均每笔 ${sg(k.avg_pnl)}</div>`:''}`;
+    const P=x=>x==null?'--':`<span class="${pc(x)}">${sg(x)}%</span>`;
+    const row=(k,l)=>st[k].n?`<tr><td>${l}</td><td class="n">${st[k].n}</td><td class="n">${P(st[k].avg_ret1)}</td><td class="n">${P(st[k].avg_ret3)}</td><td class="n">${P(st[k].avg_ret5)}</td><td class="n">${st[k].hit_up8}</td></tr>`:'';
+    $('#rvOut').innerHTML=`<div style="margin-bottom:8px"><b>${esc(o.verdict)}</b></div><table><tr><th></th><th class="n">只数</th><th class="n">1天后</th><th class="n">3天后</th><th class="n">5天后</th><th class="n">5天内涨超8%</th></tr>
+      ${row('approved','✅ 通过')}${row('wait','⏳ 等回踩')}${row('rejected','❌ 没通过')}${row('unreviewed','· 前10没送审')}</table>
+      ${o.missed.length?`<div class="mute" style="margin-top:6px">错过的：${o.missed.map(r=>esc(r.name)+'('+r.date+' 最高'+sg(r.max_up5)+'%)').join('、')}</div>`:''}
+      ${o.dodged.length?`<div class="mute">躲过的：${o.dodged.map(r=>esc(r.name)+'('+r.date+')').join('、')}</div>`:''}
+      <div class="mute" style="margin-top:6px"><small>每周五收盘后会把这份对账推送到微信。</small></div>`}).catch(e=>{$('#rvOut').textContent='计算失败：'+e.message});
 }
 
 // ================= ◆ 实盘：交易台 =================
@@ -844,16 +856,18 @@ async function pageSettings(){
   const inp=(sec,k,type='text',ph='')=>`<input type="${type}" data-sec="${sec}" data-k="${k}" value="${esc(c[sec][k])}" placeholder="${ph}">`;
   const chk=(sec,k)=>`<input type="checkbox" data-sec="${sec}" data-k="${k}" ${c[sec][k]?'checked':''}>`;
   $('#app').innerHTML=`<div class="grid g2">
-  <div class="card"><h3>微信推送</h3><div class="form">
-    <label>启用推送</label>${chk('notify','enabled')}
-    <label>PushPlus Token</label>${inp('notify','pushplus_token','password','pushplus.plus 微信扫码获取')}
-    <label>Server酱 SendKey</label>${inp('notify','serverchan_key','password','sct.ftqq.com 获取')}
-    <label>AI 交易摘要推送</label>${chk('notify','ai_summary')}
-    <label>推送模拟盘动向</label><div class="row">${chk('notify','paper')}<small class="mute">没接实盘时，靠它看系统买了什么、卖了什么、委员会结论</small></div>
-    <label>推送哪些消息</label><div class="row" style="flex-wrap:wrap;gap:6px 14px">${[['trade','成交/订单/止损'],['committee_pass','委员会通过'],['committee_reject','委员会没通过'],['watch','等回踩到价'],['daily','收盘总结'],['premarket','盘前简报'],['alert','盘中异动(很多)'],['ai_note','AI 巡检提醒'],['system','系统']].map(([k,l])=>`<label style="display:inline-flex;gap:4px;align-items:center;color:var(--text)"><input type="checkbox" class="nkind" data-k="${k}" ${((c.notify.kinds||{})[k])?'checked':''}>${l}</label>`).join('')}</div>
-    <span></span><small class="mute">实盘的成交和待确认订单不管怎么勾都会推送。没勾的消息不推，但在「消息」里能查到。</small>
-    <span></span><div class="row"><button class="pri" onclick="saveCfg()">保存</button><button onclick="testPush()">发送测试消息</button></div></div></div>
-  <div class="card"><h3>微信 ClawBot（聊天窗口）</h3><div id="wxbot"><div class="mute">加载中…</div></div></div>
+  <div class="card"><h3>微信 ClawBot（聊天窗口）</h3><div id="wxbot"><div class="mute">加载中…</div></div>
+   <div class="form" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line)">
+    <label>推送总开关</label>${chk('notify','enabled')}
+    <label>通用消息</label><div class="row" style="flex-wrap:wrap;gap:6px 14px">${[['news_major','重大新闻(每天≤5条)'],['premarket','盘前简报'],['system','系统'],['alert','自选/观察池异动(很多)'],['ai_note','AI 巡检提醒']].map(([k,l])=>`<label style="display:inline-flex;gap:4px;align-items:center;color:var(--text)"><input type="checkbox" class="nkind" data-k="${k}" ${((c.notify.kinds||{})[k])?'checked':''}>${l}</label>`).join('')}</div>
+    <span></span><small class="mute">机器人模拟盘和实盘共用；每个账户推送什么在「推送内容」里分开设置。${c.notify.pushplus_token?'微信会话过期（24 小时没说话）或额度用完时，会用之前配置的 PushPlus 兜底。':''}</small>
+    <span></span><div class="row"><button class="pri" onclick="saveCfg()">保存</button></div></div></div>
+  ${(()=>{const A=(c.notify.accounts||{})[ACCT]||{},K=A.kinds||{},nm=ACCT=='live'?'实盘':'模拟盘';
+   return `<div class="card"><h3>推送内容 · ${nm}</h3><div class="form">
+    <label>推送${nm}的动向</label><div class="row"><input type="checkbox" id="acct_push_on" ${A.enabled!==false?'checked':''}><small class="mute">${ACCT=='live'?'实盘的成交和待确认订单不管怎么设都会推送':'没接实盘时，靠它看系统买了什么、卖了什么、委员会结论'}</small></div>
+    <label>推送哪些</label><div class="row" style="flex-wrap:wrap;gap:6px 14px">${[['trade',ACCT=='live'?'买卖成交/订单/止损(必推)':'买卖成交/止损'],['committee_pass','委员会通过'],['alert_held','持仓股异动'],['news_held','持仓股新闻公告'],['watch','等回踩到价'],['daily','收盘总结'],['weekly','周五周报'],['committee_reject','委员会没通过']].map(([k,l])=>`<label style="display:inline-flex;gap:4px;align-items:center;color:var(--text)"><input type="checkbox" class="akind" data-k="${k}" ${K[k]!==false?'checked':''} ${ACCT=='live'&&k=='trade'?'disabled checked':''}>${l}</label>`).join('')}</div>
+    <span></span><small class="mute">这里只改${nm}。切换右上角「模拟盘 / 实盘」可以设置另一个。没勾的消息不推，但在「消息」里能查到。</small>
+    <span></span><div class="row"><button class="pri" onclick="saveCfg()">保存</button></div></div></div>`})()}
   <div class="card"><h3>AI 权限</h3><div class="form">
     <label>作用于模拟盘</label><input type="checkbox" id="ai_paper" ${c.ai.accounts.includes('paper')?'checked':''}>
     <label>作用于实盘</label><div><input type="checkbox" id="ai_live" ${c.ai.accounts.includes('live')?'checked':''}> <small class="mute">实盘只生成待确认订单，必须你点确认</small></div>
@@ -944,6 +958,8 @@ async function saveCfg(){const p={};document.querySelectorAll('[data-sec]').forE
   p.universe=p.universe||{};p.universe.boards=[...document.querySelectorAll('.board:checked')].map(x=>x.value);
   p.regime={caps:{}};document.querySelectorAll('.cap').forEach(i=>p.regime.caps[i.dataset.k]=+i.value);
   if(document.querySelector('.nkind')){p.notify=p.notify||{};p.notify.kinds={};document.querySelectorAll('.nkind').forEach(i=>p.notify.kinds[i.dataset.k]=i.checked)}
+  if(document.querySelector('.akind')){p.notify=p.notify||{};const K={};document.querySelectorAll('.akind').forEach(i=>K[i.dataset.k]=i.checked);
+    p.notify.accounts={[ACCT]:{enabled:$('#acct_push_on').checked,kinds:K}}}
   await post('/api/config',p);toast('已保存');status()}
 let WXT=null;
 async function wxbotLoad(){const el=$('#wxbot');if(!el)return;let s;try{s=await api('/api/wechat/status')}catch(e){el.innerHTML='<div class="mute">读取失败</div>';return}

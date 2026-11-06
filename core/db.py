@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS plans(
   created_at REAL, updated_at REAL, status TEXT, entry_price REAL, stop_loss REAL, target REAL,
   trailing_pct REAL, max_hold_days INTEGER, thesis TEXT, invalidation TEXT, watch_points TEXT,
   checks TEXT DEFAULT '{}', closed_at REAL, outcome TEXT);
+CREATE TABLE IF NOT EXISTS news_pushed(key TEXT PRIMARY KEY, ts REAL);
 CREATE TABLE IF NOT EXISTS entry_watch(
   id INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT, symbol TEXT, name TEXT, run_id INTEGER, kind TEXT,
   entry REAL, stop REAL, target REAL, ref_price REAL, created_at REAL, expires_at REAL, status TEXT,

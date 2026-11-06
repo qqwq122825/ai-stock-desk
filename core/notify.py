@@ -24,17 +24,26 @@ def _post(url, data, as_json=True, timeout=8):
 
 
 KIND_NAMES = {"trade": "成交/订单", "committee_pass": "委员会通过", "committee_reject": "委员会没通过",
-              "watch": "等回踩", "daily": "收盘总结", "premarket": "盘前简报", "alert": "盘中异动",
+              "watch": "等回踩", "daily": "收盘总结", "weekly": "周报", "alert_held": "持仓股异动", "news_held": "持仓股新闻公告",
+              "premarket": "盘前简报", "news_major": "重大新闻", "alert": "其他异动",
               "ai_note": "AI 巡检提醒", "system": "系统"}
 
 
+ACCOUNT_KINDS = ("trade", "committee_pass", "committee_reject", "watch", "daily", "weekly", "alert_held", "news_held")
+
+
 def wanted(kind, account=None, cfg=None):
-    """按设置判断这类消息要不要推送。实盘的成交/订单永远推送；没分类的（测试、手动）也推。"""
+    """按设置判断这类消息要不要推送。
+    分账户的消息（成交、委员会、等回踩、收盘总结）看 notify.accounts.<账户>；其余看 notify.kinds。
+    实盘的成交/订单永远推送；没分类的（测试、手动）也推。"""
     cfg = cfg or load_config()["notify"]
     if account == "live" and kind == "trade":
         return True
-    if account == "paper" and not cfg.get("paper", True):
-        return False
+    if account in ("paper", "live") and kind in ACCOUNT_KINDS:
+        a = (cfg.get("accounts") or {}).get(account) or {}
+        if not a.get("enabled", True):
+            return False
+        return bool((a.get("kinds") or {}).get(kind, True))
     if kind and kind in KIND_NAMES:
         return bool((cfg.get("kinds") or {}).get(kind, True))
     return True

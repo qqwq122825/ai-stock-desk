@@ -332,7 +332,9 @@ def push(title, content):
     st = _load()
     if not c["enabled"] or not st.get("bot_token"):
         return False, "未绑定"
-    if not st.get("context_token") or time.time() - (st.get("last_user_ts") or 0) > (SESSION_HOURS - 0.5) * 3600:
+    if not st.get("context_token"):
+        return False, "还没收到你的消息：先在微信里给它发一句「帮助」（微信规定你先说话，机器人才能主动发）"
+    if time.time() - (st.get("last_user_ts") or 0) > (SESSION_HOURS - 0.5) * 3600:
         return False, "会话过期（24 小时没说话）"
     used = st.get("pushes", 0)
     if used >= c["max_push"]:

@@ -258,6 +258,19 @@ class Monitor(threading.Thread):
         lines.append("\n美股影响主要在开盘，注意高开低走/低开高走，不要开盘第一分钟追。")
         notify.send("盘前外盘：%s" % s["mood"], "\n".join(lines), kind="premarket")
 
+    def check_news(self, cfg, positions):
+        """每 3 分钟看一次：持仓股的新公告/快讯（按账户推送），市场级重大新闻（通用推送）。7×24，收盘后也看。"""
+        now = time.time()
+        if now - getattr(self, "_news_ts", 0) < 180:
+            return
+        self._news_ts = now
+        try:
+            from . import news_watch
+            for item in news_watch.scan(positions):
+                notify.send(item["title"], item["content"], kind=item["kind"], account=item.get("account"))
+        except Exception as e:
+            log.warning("新闻检查失败: %s", e)
+
     def check_entry_watch(self, cfg, quotes):
         """委员会说「等回踩到 X 再买」的，到价站稳就自动重开委员会复审。"""
         from . import watch as entry_watch
@@ -301,6 +314,7 @@ class Monitor(threading.Thread):
                     if q and q["high"] > (p["peak_price"] or 0):
                         c.execute("UPDATE positions SET peak_price=? WHERE account=? AND symbol=?",
                                   (q["high"], p["account"], p["symbol"]))
+        self.check_news(cfg, positions)
         if is_open:
             self.evaluate(cfg, quotes, watch, positions, syms)
             self.check_entry_watch(cfg, quotes)
@@ -400,8 +414,16 @@ class Monitor(threading.Thread):
             if wakeup.trigger(reason, syms):
                 lines.append("\n🤖 已唤醒外部AI调研，决策结果稍后推送")
         plan = [a for a in alerts if a["src"].startswith("📋")]
-        kind = "trade" if plan else "alert"
-        acct = None
-        if plan:
+        held_by = {}
+        for p in positions:
+            held_by.setdefault(p["symbol"], set()).add(p["account"])
+        held = [a for a in alerts if a["symbol"] in held_by]
+        if plan:                                   # 持仓计划触发（止损/止盈/失效）：算成交类，最重要
             acct = "live" if any("实盘" in a["src"] for a in plan) else "paper"
-        notify.send(title[:90], "\n\n".join(lines), kind=kind, account=acct)
+            notify.send(title[:90], "\n\n".join(lines), kind="trade", account=acct)
+        elif held:                                 # 持仓股的异动：按账户分开设置
+            accts = set().union(*(held_by[a["symbol"]] for a in held))
+            notify.send(title[:90], "\n\n".join(lines), kind="alert_held",
+                        account="live" if "live" in accts else "paper")
+        else:                                      # 自选/观察池的异动：量大，默认不推
+            notify.send(title[:90], "\n\n".join(lines), kind="alert")

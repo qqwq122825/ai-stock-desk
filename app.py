@@ -261,6 +261,15 @@ def api_cfg(q, body):
     return config.masked_config()
 
 
+@route("GET", "/api/review")
+def api_review(q, body):
+    from core import review
+    acct = q.get("account", "paper")
+    o = review.outcomes(acct, int(q.get("days", 30)))
+    o.pop("groups", None)
+    return {"outcomes": o, "check": review.paper_check(acct)}
+
+
 @route("GET", "/api/wechat/status")
 def api_wechat_status(q, body):
     from core import wechat_bot
@@ -628,7 +637,9 @@ def setup_logging():
     fmt = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
     root = logging.getLogger()
     root.setLevel(logging.INFO)
-    for h in (logging.StreamHandler(), logging.FileHandler(os.path.join(config.DATA_DIR, "app.log"), encoding="utf-8")):
+    from logging.handlers import RotatingFileHandler
+    for h in (logging.StreamHandler(), RotatingFileHandler(os.path.join(config.DATA_DIR, "app.log"), maxBytes=10 * 1024 * 1024,
+                                                           backupCount=3, encoding="utf-8")):
         h.setFormatter(fmt)
         root.addHandler(h)
 

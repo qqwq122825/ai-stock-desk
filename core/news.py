@@ -149,7 +149,8 @@ def flash_news(n=20):
         out = []
         for it in lst:
             txt = re.sub(r"<[^>]+>", "", it.get("rich_text", "")).strip()
-            out.append({"time": it.get("create_time", "")[5:16], "text": txt[:200]})
+            out.append({"time": it.get("create_time", "")[5:16], "text": txt[:200], "id": it.get("id"),
+                        "ts_full": it.get("create_time", ""), "tags": [t.get("name") for t in it.get("tag") or []]})
         return out
     return _cached(("flash", n), 120, f)
 

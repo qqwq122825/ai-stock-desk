@@ -68,6 +68,8 @@ def decide(trigger="manual", focus=None):
         ctx = agent.build_context()
         user = ("【你是程序内置模型：不能运行命令，所有数据都在下面的上下文里。买入未经委员会的股票时，"
                 "系统会自动为它召开内置投研委员会，通过后才执行，所以你只需在 actions 里表达买入意图。】\n"
+                "大盘状态、情绪阶段、仓位上限一律以本次上下文里的 market_regime / emotion 为准，"
+                "不要沿用 recent_decisions 里你以前写的结论（行情会变）。\n"
                 "触发原因：%s\n%s\n\n当前上下文 JSON：\n%s\n\n请只输出一个决策 JSON 对象。"
                 % (trigger, ("重点关注：%s" % focus) if focus else "",
                    json.dumps(ctx, ensure_ascii=False, default=str)))

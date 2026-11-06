@@ -13,6 +13,8 @@
   python3 agent_cli.py global [600036 ...]   # 隔夜外盘（美股/港股/半导体/英伟达…）及对指定股票所在板块的影响
 
   选股 / 大盘：
+  python3 agent_cli.py review [--account paper]  # 委员会事后对账 + 模拟盘体检（能不能上实盘）
+  python3 agent_cli.py backup                # 立即备份 data（每天收盘后也会自动备份）
   python3 agent_cli.py regime                # 大盘情绪状态 + 总仓位上限
   python3 agent_cli.py emotion               # 情绪周期（冰点/退潮/修复/升温/高潮）+ 热门题材（情绪短线用）
   python3 agent_cli.py screen                # 全市场选股漏斗 → Top20 候选池（约10~20秒）
@@ -110,6 +112,9 @@ def main():
     p = sub.add_parser("request-restart")
     p.add_argument("reason")
     sub.add_parser("regime")
+    p = sub.add_parser("review")
+    p.add_argument("--account", default="paper")
+    sub.add_parser("backup")
     sub.add_parser("emotion")
     p = sub.add_parser("global")
     p.add_argument("symbols", nargs="*")
@@ -246,6 +251,14 @@ def main():
             ind = news.industry(s, q["name"])
             res["stocks"][s] = {"name": q["name"], "industry": ind, "link": global_market.link_for(ind, ov)}
         out(res)
+    elif a.cmd == "review":
+        from core import review
+        o = review.outcomes(a.account)
+        o.pop("groups", None)
+        out({"outcomes": o, "check": review.paper_check(a.account)})
+    elif a.cmd == "backup":
+        from core import housekeeping
+        out(housekeeping.daily())
     elif a.cmd == "regime":
         from core import screener
         out(screener.market_regime())

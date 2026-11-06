@@ -35,6 +35,17 @@ def run_daily_close(progress=None, force=False, accounts=None):
         out["accounts"][a] = r
         out["approved"] += r.get("approved", [])
         out["reviewed"] += r.get("reviewed", [])
+        if market.now().weekday() == 4:          # 周五：委员会事后对账 + 模拟盘体检周报
+            try:
+                from . import review
+                review.send_weekly(a)
+            except Exception as e:
+                log.warning("周报失败 %s: %s", a, e)
+    try:                                         # 每日维护：备份 data、清理旧的秒级行情和会议资料
+        from . import housekeeping
+        out["housekeeping"] = housekeeping.daily()
+    except Exception as e:
+        log.warning("每日维护失败: %s", e)
     if len(accts) == 1:
         return dict(out["accounts"][accts[0]], account=accts[0])
     return out
