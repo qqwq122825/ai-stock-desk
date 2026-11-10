@@ -548,8 +548,13 @@ class TestDailyClose(Base):
             daily.run_daily_close(force=True)
             self.assertEqual(seen, ["paper"])
             config.save_config({"ai": {"accounts": ["paper", "live"]}})
+            SENT.clear()
             daily.run_daily_close(force=True)
-            self.assertEqual(seen, ["paper", "paper", "live"])
+            self.assertEqual(seen, ["paper", "paper"])                        # 实盘没录资金：跳过，也不报失败
+            self.assertFalse(any("失败" in t for t, c in SENT))
+            broker.set_live_account(cash=50000)
+            daily.run_daily_close(force=True)
+            self.assertEqual(seen, ["paper", "paper", "paper", "live"])
         finally:
             screener.run, committee.run_builtin, llm.enabled = old
             config.save_config({"ai": {"accounts": ["paper"]}})
@@ -989,6 +994,10 @@ class TestMomentum(Base):
         self.assertEqual((e["stage"], e["final"]), ("冰点", True))                             # 收盘后用完整数据
         self.assertTrue(db.one("SELECT 1 FROM emotion_days WHERE date='20261105'"))
 
+    def test_retreat_means_no_new_buys(self):
+        self.assertEqual(emotion.STAGE_CAPS["退潮"], 0.0)              # 退潮只卖不买，和委员会规则一致
+        self.assertEqual(emotion.STAGE_CAPS["冰点"], 0.0)
+
     def test_style_per_account(self):
         self.assertEqual(config.style("paper"), "momentum")
         self.assertEqual(config.style("live"), "swing")
@@ -1228,7 +1237,9 @@ class TestWechatBot(Base):
         news.flash_news = lambda n=50: [
             {"id": 1, "time": now.strftime("%m-%d %H:%M"), "ts_full": ts, "tags": ["焦点"], "text": "央行宣布降准0.5个百分点"},
             {"id": 2, "time": now.strftime("%m-%d %H:%M"), "ts_full": ts, "tags": ["焦点"], "text": "某明星演唱会门票售罄"},
-            {"id": 3, "time": now.strftime("%m-%d %H:%M"), "ts_full": ts, "tags": [], "text": "长江电力签订重大合同"}]
+            {"id": 3, "time": now.strftime("%m-%d %H:%M"), "ts_full": ts, "tags": [], "text": "长江电力签订重大合同"},
+            {"id": 4, "time": now.strftime("%m-%d %H:%M"), "ts_full": ts, "tags": ["焦点"], "text": "美国国务院：呼吁停止欧盟优惠措施"},
+            {"id": 5, "time": now.strftime("%m-%d %H:%M"), "ts_full": ts, "tags": ["焦点"], "text": "英国央行行长：AI泡沫构成风险"}]
         pos = [{"symbol": "sh600900", "name": "长江电力", "account": "paper"}]
         items = news_watch.scan(pos)
         kinds = sorted((i["kind"], i.get("account")) for i in items)

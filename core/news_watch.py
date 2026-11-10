@@ -14,9 +14,11 @@ import time
 from . import db, market, news
 
 log = logging.getLogger("news_watch")
-MAJOR_WORDS = ["降准", "降息", "加息", "印花税", "证监会", "国务院", "国常会", "政治局", "中国人民银行", "央行",
-               "美联储", "鲍威尔", "汇金", "国家队", "平准基金", "关税", "制裁", "暂停交易", "熔断", "救市",
-               "战争", "停火", "非农", "CPI", "暴跌", "暴涨", "崩盘", "跌停潮"]
+MAJOR_WORDS = ["降准", "降息", "加息", "印花税", "证监会", "国常会", "国务院常务会议", "政治局", "中国人民银行",
+               "美联储", "鲍威尔", "汇金", "国家队", "平准基金", "关税", "暂停交易", "熔断", "救市",
+               "停火", "非农", "暴跌", "崩盘", "跌停潮"]
+# 命中了也不算：外国的「国务院 / 央行」、例行的报纸版面摘要
+NOT_MAJOR = ["美国国务院", "人民日报》头版", "头版的主要内容", "英国央行", "日本央行", "欧洲央行", "韩国央行"]
 MAX_MAJOR_PER_DAY = 5
 
 
@@ -78,9 +80,11 @@ def scan(positions):
         if "焦点" not in (f.get("tags") or []) or now - _ts(f.get("ts_full", ""), "%Y-%m-%d %H:%M:%S") > 1800:
             continue
         hit = [w for w in MAJOR_WORDS if w in f["text"]]
+        if any(n in f["text"] for n in NOT_MAJOR):
+            hit = [w for w in hit if w in ("降准", "降息", "加息", "熔断", "暴跌", "崩盘")]
         if not hit or _seen("major|%s" % (f.get("id") or f["text"][:60])):
             continue
         sent_today += 1
-        out.append({"kind": "news_major", "title": "重大新闻：" + f["text"][:40],
+        out.append({"kind": "news_major", "title": "重大新闻：" + " ".join(f["text"].split())[:40],
                     "content": "%s  \n%s（关键词：%s）" % (f["text"], f["time"], "、".join(hit))})
     return out

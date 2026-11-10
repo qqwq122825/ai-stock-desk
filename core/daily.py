@@ -26,6 +26,11 @@ def run_daily_close(progress=None, force=False, accounts=None):
     accts = accounts or [a for a in ("paper", "live") if a in cfg["ai"]["accounts"]] or ["paper"]
     out = {"accounts": {}, "approved": [], "reviewed": []}
     for a in accts:
+        if a == "live":
+            acc = db.one("SELECT cash FROM accounts WHERE id='live'") or {}
+            if not acc.get("cash") and not db.one("SELECT 1 FROM positions WHERE account='live' AND shares>0"):
+                out["accounts"][a] = {"skipped": "实盘还没录入资金，跳过", "approved": [], "reviewed": []}
+                continue
         try:
             r = _close_one(a, progress)
         except Exception as e:

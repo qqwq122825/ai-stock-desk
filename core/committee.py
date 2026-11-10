@@ -95,6 +95,11 @@ def build_dossier(sym, account="paper", intent="open"):
             cand = next((c for c in lc["candidates"] if c["symbol"] == sym), None)
     except Exception:
         pass
+    if emo is not None and cand:                 # 选股时已经算过题材排名：情绪数据拿不到/行业名对不上时用它补上
+        m = cand.get("metrics") or {}
+        ts = emo.get("this_stock") if isinstance(emo.get("this_stock"), dict) else {}
+        if m.get("theme_rank") and not ts.get("rank"):
+            emo["this_stock"] = dict(ts, industry=cand.get("industry"), rank=m["theme_rank"], source="选股时的题材排名")
     plan = db.one("SELECT * FROM plans WHERE account=? AND symbol=? AND status='active'", (account, sym))
     glob = None
     try:

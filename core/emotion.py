@@ -26,7 +26,7 @@ POOLS = {"zt": ("getTopicZTPool", "fbt:asc"), "zb": ("getTopicZBPool", "fbt:asc"
          "dt": ("getTopicDTPool", "fund:asc"), "yzt": ("getYesterdayZTPool", "zs:desc")}
 
 # 情绪阶段 → 新开仓总仓位上限（情绪短线模式用）
-STAGE_CAPS = {"冰点": 0.0, "退潮": 0.2, "修复": 0.5, "升温": 0.8, "高潮": 0.5}
+STAGE_CAPS = {"冰点": 0.0, "退潮": 0.0, "修复": 0.5, "升温": 0.8, "高潮": 0.5}   # 退潮=只卖不买（和委员会规则一致）
 STAGE_TIPS = {"冰点": "亏钱效应最强的时候，空仓等修复，不抄底",
               "退潮": "高位股补跌、炸板多，只卖不买",
               "修复": "情绪刚回暖，只做最强题材的龙头，小仓位",

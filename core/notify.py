@@ -76,15 +76,21 @@ def send(title, content, kind=None, account=None):
             channels.append("clawbot:err %s" % e)
     if cfg.get("enabled"):
         if cfg.get("pushplus_token"):
-            try:
-                r = json.loads(_post("https://www.pushplus.plus/send", {
-                    "token": cfg["pushplus_token"], "title": title[:100],
-                    "content": content, "template": "markdown"}))
-                good = r.get("code") == 200
-                ok = ok or good
-                channels.append("pushplus:%s" % ("ok" if good else r.get("msg")))
-            except Exception as e:
-                channels.append("pushplus:err %s" % e)
+            t = " ".join((title or "").split())[:100]          # 标题里有换行 PushPlus 会报「服务端验证错误」
+            for attempt in (1, 2):                              # 偶尔握手超时，重试一次
+                try:
+                    r = json.loads(_post("https://www.pushplus.plus/send", {
+                        "token": cfg["pushplus_token"], "title": t,
+                        "content": content, "template": "markdown"}))
+                    good = r.get("code") == 200
+                    ok = ok or good
+                    channels.append("pushplus:%s" % ("ok" if good else r.get("msg")))
+                    break
+                except Exception as e:
+                    if attempt == 2:
+                        channels.append("pushplus:err %s" % e)
+                    else:
+                        time.sleep(3)
         if cfg.get("serverchan_key"):
             try:
                 r = json.loads(_post("https://sctapi.ftqq.com/%s.send" % cfg["serverchan_key"],
