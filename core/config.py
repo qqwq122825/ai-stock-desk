@@ -155,7 +155,7 @@ DEFAULTS = {
         "vwap_break_pct": 1,            # 10 点后跌破分时均价 1% 且板块走弱 → 走
         "news_take_profit_pct": 3,      # 有利好消息且高开 ≥3% → 利好兑现，冲高就卖（真假不重要，卖得快）
         "theme_exit": True,             # 所在题材掉出热门题材前列且板块转跌 → 走
-        "theme_top": 8,                 # 只做前 8 名热门题材
+        "theme_top": 5,                 # 只做前 5 名热门题材（选股和委员会用同一个范围）
         "max_chase_pct": 5,             # 情绪短线的追高上限；实际取它和 risk.max_chase_pct 中更小的（风控只收紧不放宽）
         "min_pct": 2,                   # 当日涨幅低于 2% 不算强势
     },

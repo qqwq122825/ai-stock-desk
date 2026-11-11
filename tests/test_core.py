@@ -994,6 +994,42 @@ class TestMomentum(Base):
         self.assertEqual((e["stage"], e["final"]), ("冰点", True))                             # 收盘后用完整数据
         self.assertTrue(db.one("SELECT 1 FROM emotion_days WHERE date='20261105'"))
 
+    def test_height_drop_needs_loss_effect_to_be_retreat(self):
+        """龙头断板但赚钱效应还在（11-11：涨停85、跌停0、炸板18%、昨日涨停+2.9%）→ 修复，不是退潮。"""
+        set_pools(n_zt=93, n_zb=20, yzt_pct=4, max_lb=6)
+        emotion.sentiment(date="20990105")                                   # 上个交易日：6 连板
+        set_pools(n_zt=85, n_zb=19, yzt_pct=2.9, max_lb=4)
+        e = emotion.sentiment(date="20990106")
+        self.assertEqual((e["stage"], e["position_cap"]), ("修复", 0.5))
+        for kw, want in ((dict(yzt_pct=6), "修复"),                           # 断板日再热也不给升温
+                         (dict(yzt_pct=0.5), "退潮"), (dict(n_zb=40), "退潮"), (dict(n_dt=6), "退潮")):   # 断板 + 亏钱效应（任一）
+            set_pools(n_zt=93, n_zb=20, yzt_pct=4, max_lb=6)
+            emotion._cache.clear(); db.run("DELETE FROM emotion_days")
+            emotion.sentiment(date="20990110")
+            set_pools(**dict(dict(n_zt=85, n_zb=19, yzt_pct=2.9, max_lb=4), **kw))
+            self.assertEqual(emotion.sentiment(date="20990111")["stage"], want, kw)
+
+    def test_saved_day_from_old_rule_is_recomputed(self):
+        self._day_pools("20261104", n_zt=85, n_zb=19, yzt_pct=2.9)
+        db.run("INSERT OR REPLACE INTO emotion_days VALUES(?,?,?)",
+               ("20261104", json.dumps({"stage": "退潮", "final": True, "zt": 85, "max_lb": 4}), 0))   # 旧规则存下的误判
+        self.assertEqual(emotion._closing("20261104")["stage"], "修复")
+        self.assertEqual(db.jloads(db.one("SELECT data FROM emotion_days WHERE date='20261104'")["data"], {})["rule"],
+                         emotion.RULE_V)
+
+    def test_committee_theme_scope_matches_screener(self):
+        from core import committee
+        self.assertEqual(config.load_config()["momentum"]["theme_top"], 5)
+        d = committee.build_dossier("sh600000", "paper")
+        emo = d["emotion"]
+        self.assertEqual(emo["theme_top_n"], 5)
+        self.assertTrue(all(t["rank"] <= 5 for t in emo["themes_hot"]))
+        self.assertIn("in_hot_theme", emo["this_stock"])
+        with open(os.path.join(config.BASE_DIR, "prompts", "committee_roles.md"), encoding="utf-8") as f:
+            roles = f.read()
+        self.assertIn("themes_hot", roles); self.assertNotIn("themes_top5", roles)
+        self.assertIn("3 个交易日的持有期", roles)
+
     def test_retreat_means_no_new_buys(self):
         self.assertEqual(emotion.STAGE_CAPS["退潮"], 0.0)              # 退潮只卖不买，和委员会规则一致
         self.assertEqual(emotion.STAGE_CAPS["冰点"], 0.0)

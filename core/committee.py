@@ -83,7 +83,10 @@ def build_dossier(sym, account="paper", intent="open"):
             from . import emotion
             e = emotion.sentiment()
             emo = {k: e.get(k) for k in ("stage", "position_cap", "tip", "reasons", "error")}
-            emo["themes_top5"] = [{"name": t["name"], "zt": t["zt"], "max_lb": t["max_lb"]} for t in (e.get("themes") or [])[:5]]
+            top_n = int(load_config()["momentum"].get("theme_top", 5))       # 和选股用同一个范围，免得选出来的票被委员会以"不在热门题材"否掉
+            emo["theme_top_n"] = top_n
+            emo["themes_hot"] = [{"rank": t["rank"], "name": t["name"], "zt": t["zt"], "max_lb": t["max_lb"]}
+                                 for t in (e.get("themes") or []) if t["rank"] <= top_n]
             emo["this_stock"] = emotion.theme_of(sym, fund.get("industry"))
         except Exception as ex:
             emo = {"error": str(ex)}
@@ -100,6 +103,9 @@ def build_dossier(sym, account="paper", intent="open"):
         ts = emo.get("this_stock") if isinstance(emo.get("this_stock"), dict) else {}
         if m.get("theme_rank") and not ts.get("rank"):
             emo["this_stock"] = dict(ts, industry=cand.get("industry"), rank=m["theme_rank"], source="选股时的题材排名")
+    if emo is not None and isinstance(emo.get("this_stock"), dict) and emo.get("theme_top_n"):
+        rk = emo["this_stock"].get("rank")
+        emo["this_stock"]["in_hot_theme"] = bool(rk and rk <= emo["theme_top_n"])     # 程序算好，角色不用自己判断
     plan = db.one("SELECT * FROM plans WHERE account=? AND symbol=? AND status='active'", (account, sym))
     glob = None
     try:

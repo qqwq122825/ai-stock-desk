@@ -26,6 +26,7 @@ POOLS = {"zt": ("getTopicZTPool", "fbt:asc"), "zb": ("getTopicZBPool", "fbt:asc"
          "dt": ("getTopicDTPool", "fund:asc"), "yzt": ("getYesterdayZTPool", "zs:desc")}
 
 # 情绪阶段 → 新开仓总仓位上限（情绪短线模式用）
+RULE_V = 2          # 阶段判断规则的版本：改了规则就 +1，已保存的旧结果会按新规则重算
 STAGE_CAPS = {"冰点": 0.0, "退潮": 0.0, "修复": 0.5, "升温": 0.8, "高潮": 0.5}   # 退潮=只卖不买（和委员会规则一致）
 STAGE_TIPS = {"冰点": "亏钱效应最强的时候，空仓等修复，不抄底",
               "退潮": "高位股补跌、炸板多，只卖不买",
@@ -101,7 +102,7 @@ def _closing(date):
     try:
         row = db.one("SELECT data FROM emotion_days WHERE date=?", (date,))
         d = db.jloads(row["data"], {}) if row else {}
-        if d.get("final") and d.get("stage"):
+        if d.get("final") and d.get("stage") and d.get("rule") == RULE_V:   # 旧规则算的结果不沿用，按新规则重算
             return dict(d, date=date)
     except Exception:
         pass
@@ -147,11 +148,17 @@ def _compute(date, zt, zb, dt, yzt):
     if yzt_avg is not None:
         why.append("昨日涨停今天平均%+.1f%%" % yzt_avg)
     # 阶段判断（经验规则，宁可保守）
+    # 龙头断板（最高连板比上个交易日低 2 板以上、涨停数也少了）只有同时出现亏钱效应才算退潮；
+    # 否则是高低切换：最多算「修复」，不给「升温/高潮」
+    height_drop = bool(prev.get("max_lb") and max_lb < prev["max_lb"] - 1 and n_zt < prev.get("zt", 0))
+    loss = zb_rate >= 30 or n_dt >= 5 or yzt_avg is None or yzt_avg < 1
     if n_zt < 30 or n_dt >= 20 or (yzt_avg is not None and yzt_avg < -2):
         stage = "冰点"
-    elif zb_rate >= 40 or (yzt_avg is not None and yzt_avg < 0) or \
-            (prev.get("max_lb") and max_lb < prev["max_lb"] - 1 and n_zt < prev.get("zt", 0)):
+    elif zb_rate >= 40 or (yzt_avg is not None and yzt_avg < 0) or (height_drop and loss):
         stage = "退潮"
+    elif height_drop:
+        stage = "修复"
+        why.append("最高连板从 %d 降到 %d，但没有亏钱效应（高低切换），按「修复」算" % (prev["max_lb"], max_lb))
     elif n_zt >= 100 and zb_rate < 25 and max_lb >= 6:
         stage = "高潮"
     elif yzt_avg is not None and yzt_avg >= 3 and zb_rate < 35:
@@ -160,7 +167,7 @@ def _compute(date, zt, zb, dt, yzt):
         stage = "修复"
     if prev.get("zt"):
         why.append("涨停数较上个交易日 %+d" % (n_zt - prev["zt"]))
-    return {"date": date, "stage": stage, "position_cap": STAGE_CAPS[stage], "tip": STAGE_TIPS[stage],
+    return {"date": date, "rule": RULE_V, "stage": stage, "position_cap": STAGE_CAPS[stage], "tip": STAGE_TIPS[stage],
             "zt": n_zt, "dt": n_dt, "zb": n_zb, "zb_rate": round(zb_rate, 1), "max_lb": max_lb,
             "yzt_avg_pct": round(yzt_avg, 2) if yzt_avg is not None else None, "reasons": why,
             "themes": hot_themes(zt)[:8]}
@@ -253,7 +260,7 @@ def theme_of(sym, industry=None):
 def _save_day(date, val):
     try:
         keep = {k: val[k] for k in ("stage", "zt", "dt", "zb", "zb_rate", "max_lb", "yzt_avg_pct")}
-        keep.update(final=True, themes=[{x: t[x] for x in ("name", "zt", "max_lb", "leaders", "rank", "heat")}
+        keep.update(final=True, rule=val.get("rule"), themes=[{x: t[x] for x in ("name", "zt", "max_lb", "leaders", "rank", "heat")}
                                         for t in val.get("themes") or []])
         db.run("INSERT OR REPLACE INTO emotion_days VALUES(?,?,?)", (date, json.dumps(keep, ensure_ascii=False), time.time()))
     except Exception as e:
