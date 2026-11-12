@@ -997,17 +997,17 @@ class TestMomentum(Base):
     def test_height_drop_needs_loss_effect_to_be_retreat(self):
         """龙头断板但赚钱效应还在（11-11：涨停85、跌停0、炸板18%、昨日涨停+2.9%）→ 修复，不是退潮。"""
         set_pools(n_zt=93, n_zb=20, yzt_pct=4, max_lb=6)
-        emotion.sentiment(date="20990105")                                   # 上个交易日：6 连板
+        emotion.sentiment(date="20200105")                                   # 上个交易日：6 连板
         set_pools(n_zt=85, n_zb=19, yzt_pct=2.9, max_lb=4)
-        e = emotion.sentiment(date="20990106")
+        e = emotion.sentiment(date="20200106")
         self.assertEqual((e["stage"], e["position_cap"]), ("修复", 0.5))
         for kw, want in ((dict(yzt_pct=6), "修复"),                           # 断板日再热也不给升温
                          (dict(yzt_pct=0.5), "退潮"), (dict(n_zb=40), "退潮"), (dict(n_dt=6), "退潮")):   # 断板 + 亏钱效应（任一）
             set_pools(n_zt=93, n_zb=20, yzt_pct=4, max_lb=6)
             emotion._cache.clear(); db.run("DELETE FROM emotion_days")
-            emotion.sentiment(date="20990110")
+            emotion.sentiment(date="20200110")
             set_pools(**dict(dict(n_zt=85, n_zb=19, yzt_pct=2.9, max_lb=4), **kw))
-            self.assertEqual(emotion.sentiment(date="20990111")["stage"], want, kw)
+            self.assertEqual(emotion.sentiment(date="20200111")["stage"], want, kw)
 
     def test_saved_day_from_old_rule_is_recomputed(self):
         self._day_pools("20261104", n_zt=85, n_zb=19, yzt_pct=2.9)
@@ -1029,6 +1029,25 @@ class TestMomentum(Base):
             roles = f.read()
         self.assertIn("themes_hot", roles); self.assertNotIn("themes_top5", roles)
         self.assertIn("3 个交易日的持有期", roles)
+
+    def test_close_screen_retries_on_data_error(self):
+        from core import daily
+        calls, real = [], daily.screener.run
+        self.addCleanup(setattr, daily.screener, "run", real)
+        self.addCleanup(setattr, daily, "SCREEN_RETRY_WAITS", daily.SCREEN_RETRY_WAITS)
+        daily.SCREEN_RETRY_WAITS = (0, 0)
+
+        def flaky(**kw):
+            calls.append(1)
+            if len(calls) < 3:
+                raise OSError("HTTP Error 502: Bad Gateway")
+            return {"ok": 1}
+        daily.screener.run = flaky
+        self.assertEqual(daily._screen_with_retry("paper", lambda m: None), {"ok": 1})
+        self.assertEqual(len(calls), 3)
+        calls.clear()
+        daily.screener.run = lambda **kw: (_ for _ in ()).throw(OSError("502"))
+        self.assertRaises(OSError, daily._screen_with_retry, "paper", lambda m: None)
 
     def test_retreat_means_no_new_buys(self):
         self.assertEqual(emotion.STAGE_CAPS["退潮"], 0.0)              # 退潮只卖不买，和委员会规则一致

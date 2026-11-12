@@ -194,7 +194,9 @@ class Monitor(threading.Thread):
             try:
                 self.status["daily"] = "运行中"
                 r = daily.run_daily_close()   # 按 ai.accounts 分别跑
-                self.status["daily"] = "完成：通过%d/送审%d" % (len(r.get("approved", [])), len(r.get("reviewed", [])))
+                errs = [x.get("error") for x in ([r] + list((r.get("accounts") or {}).values())) if x.get("error")]
+                self.status["daily"] = ("失败：%s" % errs[0]) if errs else \
+                    "完成：通过%d/送审%d" % (len(r.get("approved", [])), len(r.get("reviewed", [])))
             except Exception as e:
                 log.exception("每日收盘流程失败")
                 self.status["daily"] = "失败：%s" % e

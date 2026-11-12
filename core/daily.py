@@ -56,6 +56,21 @@ def run_daily_close(progress=None, force=False, accounts=None):
     return out
 
 
+SCREEN_RETRY_WAITS = (60, 180)      # 行情接口偶尔 502/超时（11-12 收盘那次 1 秒就失败了）：等 1 分钟、3 分钟各重试一次
+
+
+def _screen_with_retry(account, say):
+    for i, wait in enumerate(SCREEN_RETRY_WAITS + (None,)):
+        try:
+            return screener.run(account=account)
+        except Exception as e:
+            if wait is None:
+                raise
+            log.warning("选股失败（第 %d 次）：%s，%d 秒后重试", i + 1, e, wait)
+            say("选股失败：%s，%d 秒后重试…" % (e, wait))
+            time.sleep(wait)
+
+
 def _close_one(account, progress=None):
     say = progress or (lambda m: log.info(m))
     cfg = load_config()
@@ -63,7 +78,7 @@ def _close_one(account, progress=None):
     an = "实盘" if account == "live" else "模拟盘"
     t0 = time.time()
     say("每日收盘流程（%s）：选股中…" % an)
-    res = screener.run(account=account)
+    res = _screen_with_retry(account, say)
     cands = res["candidates"]
     regime = res["regime"]
     summary = {"screen_id": res["screen_id"], "regime": regime.get("state"), "candidates": len(cands),
