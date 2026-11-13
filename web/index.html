@@ -886,6 +886,13 @@ async function pageSettings(){
     <span></span><button class="pri" onclick="saveCfg()">保存</button></div></div>
   <div class="card"><h3>风控</h3><div class="form">${Object.keys(c.risk).map(k=>`<label>${{min_confidence:'最低置信度',max_position_pct:'单票仓位上限(0-1)',max_positions:'最多持仓只数',max_daily_trades:'每日最多成交',daily_loss_limit_pct:'当日熔断(如-0.05)',max_order_value:'单笔上限(0不限)',block_st:'禁买ST',restrict_to_watchlist:'只买自选',max_chase_pct:'追高上限(涨幅%)'}[k]||k}</label>${typeof c.risk[k]=='boolean'?chk('risk',k):inp('risk',k,'number')}`).join('')}
     <span></span><button class="pri" onclick="saveCfg()">保存</button></div></div>
+  <div class="card"><h3>行情代理 <span class="mute r">服务器拿不到行情时用</span></h3><div class="form">
+    <label>启用</label>${chk('proxy','enabled')}
+    <label>代理地址</label>${inp('proxy','api_url','password','代理提取 API 地址，或 http://主机:端口')}
+    <label>什么时候用</label><select data-sec="proxy" data-k="mode"><option value="fallback" ${c.proxy.mode!='always'?'selected':''}>直连不通时才用（推荐）</option><option value="always" ${c.proxy.mode=='always'?'selected':''}>东方财富行情一律走代理</option></select>
+    <label>多久换一批(分钟)</label>${inp('proxy','refresh_min','number')}
+    <span></span><div class="row"><button class="pri" onclick="saveCfg()">保存</button><button onclick="testProxy()">保存并测试</button></div>
+    <span></span><small class="mute" id="proxy_msg">只有东方财富的公开行情会走代理；大模型密钥、微信、推送都不走。地址里带密码，保存后显示为 ******。</small></div></div>
   <div class="card"><h3>费用 & 模拟盘</h3><div class="form">
     <label>佣金率</label>${inp('fees','commission_rate','number')}<label>最低佣金</label>${inp('fees','commission_min','number')}
     <label>印花税(卖)</label>${inp('fees','stamp_duty_rate','number')}<label>过户费</label>${inp('fees','transfer_fee_rate','number')}
@@ -982,6 +989,8 @@ async function wxbotLogin(){await post('/api/wechat/login');wxbotLoad()}
 async function wxbotVerify(){await post('/api/wechat/verify',{code:$('#wxcode').value});toast('已提交');wxbotLoad()}
 async function wxbotUnbind(){if(!confirm('解绑后提醒改走 PushPlus，确定？'))return;await post('/api/wechat/unbind');wxbotLoad()}
 async function wxbotTest(){const r=await post('/api/wechat/test');toast((r.ok?'✅ 已发到微信 ':'❌ ')+esc(r.info))}
+async function testProxy(){await saveCfg();const m=$('#proxy_msg');if(m)m.textContent='测试中…（最多半分钟）';
+  try{const r=await post('/api/proxy/test');const t=(r.ok?'✅ ':'❌ ')+esc(r.msg||'');toast(t);const m2=$('#proxy_msg');if(m2)m2.innerHTML=t}catch(e){toast('❌ '+esc(e.message||'失败'))}}
 async function testPush(){await saveCfg();const r=await post('/api/notify/test');toast((r.ok?'✅ ':'❌ ')+esc(r.channels))}
 async function resetPaper(){if(!confirm('清空模拟盘所有持仓和成交记录？'))return;await post('/api/accounts/paper/reset',{cash:+$('#rcash').value});toast('已重置')}
 async function syncLive(){const r=await post('/api/accounts/live/sync');toast(esc(r.message))}

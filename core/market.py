@@ -93,12 +93,69 @@ def lot_rule(sym):
     return 100, 100
 
 
-def _http_get(url, timeout=8, encoding="utf-8"):
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (Macintosh) ai-stock/1.0",
-        "Referer": "https://gu.qq.com/"})
+# 东方财富 push2 行情主机偶尔对某些机房 IP 持续返回 502（服务器 11-11 晚起全市场快照、实时资金流都拿不到，
+# 选股连续两天失败）。同一套接口有多个主机名，主的不通就换下一个；都不通且设置里开了「行情代理」就走代理。
+# 哪条路通了就先记住用它 10 分钟。
+EM_HOSTS = ("push2.eastmoney.com", "82.push2.eastmoney.com", "push2delay.eastmoney.com")
+_em_ok = {"host": None, "until": 0}
+_HDR = {"User-Agent": "Mozilla/5.0 (Macintosh) ai-stock/1.0", "Referer": "https://gu.qq.com/"}
+
+
+def _open(url, timeout, encoding):
+    req = urllib.request.Request(url, headers=_HDR)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode(encoding, errors="replace")
+
+
+def _via_proxy(url, timeout, encoding):
+    from . import proxy
+    return proxy.get(url, _HDR, timeout, encoding)
+
+
+def _proxy_mode():
+    """'' 不用代理 / 'fallback' 直连不通才用 / 'always' 东方财富行情一律走代理。"""
+    try:
+        from . import proxy
+        if not proxy.enabled():
+            return ""
+        return "always" if proxy.conf().get("mode") == "always" else "fallback"
+    except Exception:
+        return ""
+
+
+def _http_get(url, timeout=8, encoding="utf-8"):
+    pre = "https://" + EM_HOSTS[0] + "/"
+    if not url.startswith(pre):
+        if ".eastmoney.com/" in url and _proxy_mode() == "always":
+            try:
+                return _via_proxy(url, timeout, encoding)
+            except Exception:
+                pass                                # 代理不行就直连，别因为代理把本来能用的接口弄坏
+        return _open(url, timeout, encoding)
+    pm = _proxy_mode()
+    routes = list(EM_HOSTS) + (["proxy"] if pm else [])
+    if pm == "always":
+        routes = ["proxy"] + list(EM_HOSTS)
+    elif _em_ok["host"] in routes and _em_ok["until"] > time.time():
+        routes.remove(_em_ok["host"])
+        routes.insert(0, _em_ok["host"])
+    err = None
+    for h in routes:
+        try:
+            if h == "proxy":
+                text = _via_proxy(url, timeout, encoding)
+            else:
+                text = _open("https://" + h + "/" + url[len(pre):], timeout, encoding)
+        except Exception as e:                      # 502/超时/连接被拒：换下一条路
+            err = err or e
+            continue
+        if h != _em_ok["host"]:
+            if err is not None:
+                log.warning("东方财富行情：%s 不通（%s），改用 %s", EM_HOSTS[0], err, "代理" if h == "proxy" else h)
+            _em_ok["host"] = h
+        _em_ok["until"] = time.time() + 600
+        return text
+    raise err
 
 
 def _f(x):

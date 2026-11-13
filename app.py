@@ -311,6 +311,18 @@ def api_cfg_save(q, body):
     return config.masked_config()
 
 
+@route("GET", "/api/proxy/status")
+def api_proxy_status(q, body):
+    from core import proxy
+    return proxy.status()
+
+
+@route("POST", "/api/proxy/test")
+def api_proxy_test(q, body):
+    from core import proxy
+    return proxy.test()
+
+
 @route("POST", "/api/notify/test")
 def api_notify_test(q, body):
     ok, ch = notify.send("测试推送：AI股票系统", "如果你在微信看到这条，推送配置成功 ✅  \n%s" % market.now())

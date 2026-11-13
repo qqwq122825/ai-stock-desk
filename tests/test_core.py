@@ -1030,6 +1030,86 @@ class TestMomentum(Base):
         self.assertIn("themes_hot", roles); self.assertNotIn("themes_top5", roles)
         self.assertIn("3 个交易日的持有期", roles)
 
+    def test_eastmoney_host_fallback(self):
+        real, seen = market._open, []
+        self.addCleanup(setattr, market, "_open", real)
+        self.addCleanup(market._em_ok.update, host=None, until=0)
+        market._em_ok.update(host=None, until=0)
+
+        def fake(url, timeout, encoding):
+            seen.append(url.split("/")[2])
+            if url.startswith("https://push2.eastmoney.com/"):
+                raise OSError("HTTP Error 502: Bad Gateway")
+            return "ok " + url.split("/", 3)[3]
+        market._open = fake
+        self.assertEqual(market._http_get("https://push2.eastmoney.com/api/qt/clist/get?pn=1"), "ok api/qt/clist/get?pn=1")
+        self.assertEqual(seen, ["push2.eastmoney.com", "82.push2.eastmoney.com"])
+        seen.clear()
+        market._http_get("https://push2.eastmoney.com/api/x")                 # 记住能用的主机，不再先撞 502
+        self.assertEqual(seen, ["82.push2.eastmoney.com"])
+        seen.clear()
+        market._http_get("https://push2ex.eastmoney.com/getTopicZTPool")      # 其他主机不受影响
+        self.assertEqual(seen, ["push2ex.eastmoney.com"])
+        market._open = lambda *a: (_ for _ in ()).throw(OSError("502"))
+        market._em_ok.update(host=None, until=0)
+        self.assertRaises(OSError, market._http_get, "https://push2.eastmoney.com/api/x")
+
+    def test_proxy_parse_and_mask(self):
+        from core import proxy
+        self.assertEqual(proxy.parse("1.2.3.4:8080\r\n5.6.7.8:9000\n1.2.3.4:8080\n"), ["1.2.3.4:8080", "5.6.7.8:9000"])
+        self.assertEqual(proxy.parse('{"code":0,"data":[{"ip":"1.2.3.4","port":8080},{"ip":"5.6.7.8","port":"9000"}]}'),
+                         ["1.2.3.4:8080", "5.6.7.8:9000"])
+        self.assertEqual(proxy.parse('{"data":["gw.example.com:7777"]}'), ["gw.example.com:7777"])
+        self.assertEqual(proxy.parse("<html>error</html>"), [])
+        self.assertEqual(proxy._fixed("http://u:p@gw.example.com:7777"), "u:p@gw.example.com:7777")
+        self.assertIsNone(proxy._fixed("http://api.example.com:7777/iplist?password=x&num=200"))
+        self.assertFalse(proxy.enabled())                                        # 默认关闭
+        config.save_config({"proxy": {"enabled": True, "api_url": "http://api.example.com/iplist?password=SECRET"}})
+        self.assertTrue(proxy.enabled())
+        self.assertEqual(config.masked_config()["proxy"]["api_url"], "******")     # 接口返回时打码
+        config.save_config({"proxy": {"api_url": "******"}})                      # 网页原样存回不会把密码冲掉
+        self.assertIn("SECRET", config.load_config()["proxy"]["api_url"])
+        config.save_config({"proxy": {"enabled": False, "api_url": ""}})
+
+    def test_proxy_route_when_direct_blocked(self):
+        from core import proxy
+        seen = []
+        for obj, name in ((market, "_open"), (proxy, "_open_via"), (proxy, "_fetch")):
+            self.addCleanup(setattr, obj, name, getattr(obj, name))
+        self.addCleanup(market._em_ok.update, host=None, until=0)
+        self.addCleanup(proxy._st.update, list=[], ts=0, bad={}, good=None, err="", down_until=0)
+        market._em_ok.update(host=None, until=0)
+        proxy._st.update(list=[], ts=0, bad={}, good=None, err="", down_until=0)
+
+        def blocked(url, timeout, encoding):
+            seen.append("direct:" + url.split("/")[2])
+            if "push2" in url.split("/")[2] and "push2ex" not in url:
+                raise OSError("HTTP Error 502: Bad Gateway")
+            return "direct"
+        market._open = blocked
+        proxy._fetch = lambda url: ["1.1.1.1:80", "2.2.2.2:80"]
+
+        def via(p, url, headers, timeout, encoding):
+            seen.append("proxy:" + p)
+            if p == "1.1.1.1:80":
+                raise OSError("dead")
+            return "via " + p
+        proxy._open_via = via
+        u = "https://push2.eastmoney.com/api/qt/clist/get?pn=1"
+        config.save_config({"proxy": {"enabled": False}})
+        self.addCleanup(config.save_config, {"proxy": {"enabled": False, "api_url": ""}})
+        self.assertRaises(OSError, market._http_get, u)                          # 没开代理：直连全失败就报错
+        config.save_config({"proxy": {"enabled": True, "api_url": "http://api.example.com/iplist?x=1"}})
+        self.assertEqual(market._http_get(u), "via 2.2.2.2:80")                  # 开了：直连不通 → 代理，坏的自动跳过
+        self.assertEqual(market._em_ok["host"], "proxy")
+        seen.clear()
+        self.assertEqual(market._http_get(u), "via 2.2.2.2:80")                  # 记住代理这条路和好用的那个代理
+        self.assertEqual(seen, ["proxy:2.2.2.2:80"])
+        seen.clear()
+        self.assertEqual(market._http_get("https://qt.gtimg.cn/q=sh600000"), "direct")     # 其他行情源不走代理
+        self.assertEqual(market._http_get("https://push2ex.eastmoney.com/x"), "direct")    # fallback 模式下能直连的不走代理
+        self.assertEqual(seen, ["direct:qt.gtimg.cn", "direct:push2ex.eastmoney.com"])
+
     def test_close_screen_retries_on_data_error(self):
         from core import daily
         calls, real = [], daily.screener.run
