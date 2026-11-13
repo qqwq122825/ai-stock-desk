@@ -146,6 +146,7 @@ DEFAULTS = {
     # 行情代理（服务器 IP 被行情源封控时用）：只有东方财富的公开行情走代理，大模型/微信/推送不走
     "proxy": {
         "enabled": False,
+        "protocol": "socks5",           # 提取 API 返回的 ip:port 使用此协议；固定代理以 URL 前缀为准
         "api_url": "",                  # 代理提取 API（返回一批 ip:port），或固定代理 http://host:port。含密码，接口返回时打码
         "mode": "fallback",             # fallback=直连不通才走代理；always=东方财富行情一律走代理
         "refresh_min": 5,               # 多久重新提取一批

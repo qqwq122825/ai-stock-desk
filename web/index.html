@@ -888,7 +888,8 @@ async function pageSettings(){
     <span></span><button class="pri" onclick="saveCfg()">保存</button></div></div>
   <div class="card"><h3>行情代理 <span class="mute r">服务器拿不到行情时用</span></h3><div class="form">
     <label>启用</label>${chk('proxy','enabled')}
-    <label>代理地址</label>${inp('proxy','api_url','password','代理提取 API 地址，或 http://主机:端口')}
+    <label>代理协议</label><select data-sec="proxy" data-k="protocol"><option value="socks5" ${c.proxy.protocol!='http'?'selected':''}>SOCKS5（代理解析域名）</option><option value="http" ${c.proxy.protocol=='http'?'selected':''}>HTTP</option></select>
+    <label>代理地址</label>${inp('proxy','api_url','password','代理提取 API 地址，或 socks5://主机:端口')}
     <label>什么时候用</label><select data-sec="proxy" data-k="mode"><option value="fallback" ${c.proxy.mode!='always'?'selected':''}>直连不通时才用（推荐）</option><option value="always" ${c.proxy.mode=='always'?'selected':''}>东方财富行情一律走代理</option></select>
     <label>多久换一批(分钟)</label>${inp('proxy','refresh_min','number')}
     <span></span><div class="row"><button class="pri" onclick="saveCfg()">保存</button><button onclick="testProxy()">保存并测试</button></div>
