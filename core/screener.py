@@ -45,14 +45,28 @@ def _num(x, default=0.0):
         return default
 
 
+PAGE_TRIES = 3
+
+
+def _page(p, fid, fs):
+    """取一页；走代理时个别代理会超时，一页失败不该让整份全市场快照作废，所以单页重试。"""
+    err = None
+    for i in range(PAGE_TRIES):
+        try:
+            return json.loads(market._http_get(CLIST % (p, fid, fs), timeout=10)).get("data")
+        except Exception as e:
+            err = e
+            time.sleep(0.5 * i)
+    raise err
+
+
 def _clist(fs, fid="f6", max_pages=80, workers=6):
-    first = json.loads(market._http_get(CLIST % (1, fid, fs), timeout=10))["data"]
+    first = _page(1, fid, fs)
     rows = list(first["diff"])
     pages = min(max_pages, (first["total"] + 99) // 100)
     if pages > 1:
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            for d in ex.map(lambda p: json.loads(market._http_get(CLIST % (p, fid, fs), timeout=10)).get("data"),
-                            range(2, pages + 1)):
+            for d in ex.map(lambda p: _page(p, fid, fs), range(2, pages + 1)):
                 if d:
                     rows.extend(d["diff"])
     return rows

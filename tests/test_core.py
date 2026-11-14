@@ -1077,9 +1077,9 @@ class TestMomentum(Base):
         for obj, name in ((market, "_open"), (proxy, "_open_via"), (proxy, "_fetch")):
             self.addCleanup(setattr, obj, name, getattr(obj, name))
         self.addCleanup(market._em_ok.update, host=None, until=0)
-        self.addCleanup(proxy._st.update, list=[], ts=0, bad={}, good=None, err="", down_until=0)
+        self.addCleanup(proxy._st.update, list=[], ts=0, bad={}, good=None, goods=[], fails=0, err="", down_until=0)
         market._em_ok.update(host=None, until=0)
-        proxy._st.update(list=[], ts=0, bad={}, good=None, err="", down_until=0)
+        proxy._st.update(list=[], ts=0, bad={}, good=None, goods=[], fails=0, err="", down_until=0)
 
         def blocked(url, timeout, encoding):
             seen.append("direct:" + url.split("/")[2])
@@ -1109,6 +1109,50 @@ class TestMomentum(Base):
         self.assertEqual(market._http_get("https://qt.gtimg.cn/q=sh600000"), "direct")     # 其他行情源不走代理
         self.assertEqual(market._http_get("https://push2ex.eastmoney.com/x"), "direct")    # fallback 模式下能直连的不走代理
         self.assertEqual(seen, ["direct:qt.gtimg.cn", "direct:push2ex.eastmoney.com"])
+
+    def test_snapshot_survives_flaky_proxy_pages(self):
+        from core import proxy
+        real = market._http_get
+        self.addCleanup(setattr, market, "_http_get", real)
+        self.addCleanup(setattr, screener, "PAGE_TRIES", screener.PAGE_TRIES)
+        n = {}
+
+        def flaky(url, timeout=8, encoding="utf-8"):
+            pn = int(url.split("pn=")[1].split("&")[0])
+            n[pn] = n.get(pn, 0) + 1
+            if pn in (1, 3) and n[pn] == 1:                      # 第 1、3 页第一次超时
+                raise OSError("timed out")
+            return json.dumps({"data": {"total": 250, "diff": [{"f12": "%06d" % (pn * 10 + i)} for i in range(2)]}})
+        market._http_get = flaky
+        self.assertEqual(len(screener._clist("x")), 6)           # 单页重试，整份快照不作废
+        self.assertEqual((n[1], n[3]), (2, 2))
+        # 代理：单次全失败不会立刻把代理整体标成不可用（并发时别的线程可能正好成功），连续 4 次才歇一会
+        for obj, name in ((proxy, "_open_via"), (proxy, "_fetch")):
+            self.addCleanup(setattr, obj, name, getattr(obj, name))
+        reset = dict(list=[], ts=0, bad={}, good=None, goods=[], fails=0, err="", down_until=0)
+        self.addCleanup(proxy._st.update, **reset)
+        self.addCleanup(config.save_config, {"proxy": {"enabled": False, "api_url": ""}})
+        proxy._st.update(**reset)
+        config.save_config({"proxy": {"enabled": True, "api_url": "http://api.example.com/iplist?x=1"}})
+        proxy._fetch = lambda url: ["9.9.9.%d:80" % i for i in range(1, 60)]
+        proxy._open_via = lambda p, *a: (_ for _ in ()).throw(OSError("dead"))
+        for _ in range(3):
+            self.assertRaises(OSError, proxy.get, "https://x", {})
+        self.assertEqual(proxy._st["down_until"], 0)
+        self.assertRaises(OSError, proxy.get, "https://x", {})
+        self.assertGreater(proxy._st["down_until"], time.time())
+        # 名单过期（提取的 IP 几分钟就失效）：这批都不通时重新提取一批，用新的
+        proxy._st.update(down_until=0, bad={}, fails=0, list=["9.9.9.1:80"], ts=time.time() - 100)
+        proxy._fetch = lambda url: ["8.8.8.1:80", "8.8.8.2:80"]
+        proxy._open_via = lambda p, *a: "fresh" if p.startswith("8.") else (_ for _ in ()).throw(OSError("expired"))
+        self.assertEqual(proxy.get("https://x", {}), "fresh")
+        proxy._fetch = lambda url: ["9.9.9.%d:80" % i for i in range(1, 60)]
+        proxy._st.update(down_until=0, bad={}, list=[], ts=0)
+        proxy._open_via = lambda p, *a: "ok"
+        for _ in range(20):
+            proxy.get("https://x", {})
+        self.assertGreaterEqual(len(proxy._st["goods"]), 1)      # 记住好用的，下次先用
+        self.assertLessEqual(len(proxy._st["goods"]), proxy.MAX_GOODS)
 
     def test_close_screen_retries_on_data_error(self):
         from core import daily

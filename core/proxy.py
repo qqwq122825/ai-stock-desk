@@ -21,9 +21,11 @@ from .config import load_config
 
 log = logging.getLogger("proxy")
 _lock = threading.Lock()
-_st = {"list": [], "ts": 0, "bad": {}, "good": None, "err": "", "down_until": 0}
+_st = {"list": [], "ts": 0, "bad": {}, "good": None, "goods": [], "fails": 0, "err": "", "down_until": 0}
+MAX_GOODS = 12          # 记住最近好用的一批代理：选股要并发取 60 多页，只记一个会全挤在它身上
 _PAIR = re.compile(r"(?<![\d.])((?:\d{1,3}\.){3}\d{1,3}|[A-Za-z0-9][A-Za-z0-9.-]+\.[A-Za-z]{2,}):(\d{2,5})(?!\d)")
 BAD_SECONDS = 600
+STALE_SECONDS = 45
 
 
 def conf():
@@ -101,13 +103,30 @@ def pool(force=False):
 
 def _candidates(n):
     lst, now = pool(), time.time()
-    live = [p for p in lst if _st["bad"].get(p, 0) < now]
-    random.shuffle(live)
-    g = _st["good"]
-    if g in live:
-        live.remove(g)
-        live.insert(0, g)
-    return live[:n]
+    bad = dict(_st["bad"])
+    live = [p for p in lst if bad.get(p, 0) < now]
+    goods = [p for p in list(_st["goods"]) if p in live]
+    random.shuffle(goods)                    # 并发时各线程分散到不同的好代理上
+    rest = [p for p in live if p not in goods]
+    random.shuffle(rest)
+    return (goods + rest)[:n]
+
+
+def _mark(p, ok):
+    with _lock:
+        if ok:
+            _st["good"] = p
+            _st["fails"] = 0
+            if p in _st["goods"]:
+                _st["goods"].remove(p)
+            _st["goods"].insert(0, p)
+            del _st["goods"][MAX_GOODS:]
+        else:
+            _st["bad"][p] = time.time() + BAD_SECONDS
+            if p in _st["goods"]:
+                _st["goods"].remove(p)
+            if _st["good"] == p:
+                _st["good"] = _st["goods"][0] if _st["goods"] else None
 
 
 def _open_via(p, url, headers, timeout, encoding):
@@ -200,10 +219,10 @@ def _socks_open(p, url, headers, timeout, encoding):
         return r.read().decode(encoding, errors="replace")
 
 
-def get(url, headers, timeout=8, encoding="utf-8", tries=3):
+def get(url, headers, timeout=8, encoding="utf-8", tries=5):
     """经代理取一个地址；换着试几个代理，都不行就抛最后一个错误。"""
     if _st["down_until"] > time.time():
-        raise OSError("代理暂时都不可用（1 分钟后再试）")
+        raise OSError("代理暂时都不可用（稍后再试）")
     cands = _candidates(tries)
     if not cands and len(pool()) > 0:        # 都被标记成坏的了：重新提取一批
         with _lock:
@@ -213,24 +232,37 @@ def get(url, headers, timeout=8, encoding="utf-8", tries=3):
     if not cands:
         raise OSError(_st["err"] or "没有可用的代理")
     err = None
-    for p in cands:
-        try:
-            text = _open_via(p, url, headers, timeout, encoding)
-            _st["good"] = p
-            return text
-        except Exception as e:
-            err = e
-            _st["bad"][p] = time.time() + BAD_SECONDS
-            if _st["good"] == p:
-                _st["good"] = None
-    _st["down_until"] = time.time() + 60
+    for rnd in (0, 1):
+        for p in cands:
+            try:
+                text = _open_via(p, url, headers, timeout, encoding)
+                _mark(p, True)
+                return text
+            except Exception as e:
+                err = e
+                _mark(p, False)
+        # 这批都不通：提取来的 IP 往往几分钟就过期，名单超过 45 秒就重新提取一批再试 3 个（最多 45 秒提取一次）
+        if rnd or _fixed((conf().get("api_url") or "").strip()) or time.time() - _st["ts"] < STALE_SECONDS:
+            break
+        old = set(_st["list"])
+        fresh = [p for p in pool(force=True) if p not in old]
+        random.shuffle(fresh)
+        cands = fresh[:3]
+        if not cands:
+            break
+    with _lock:                              # 单次失败不算数（并发时别的线程可能正好成功）；连续 4 次才歇 30 秒
+        _st["fails"] += 1
+        if _st["fails"] >= 4:
+            _st["fails"] = 0
+            _st["down_until"] = time.time() + 30
     raise OSError("代理都失败：%s" % type(err).__name__)
 
 
 def status():
     now = time.time()
     return {"enabled": enabled(), "count": len(_st["list"]) or (1 if _fixed((conf().get("api_url") or "")) else 0),
-            "bad": sum(1 for v in _st["bad"].values() if v > now), "using": bool(_st["good"]),
+            "bad": sum(1 for v in list(_st["bad"].values()) if v > now), "using": bool(_st["good"]),
+            "good": len(_st["goods"]),
             "fetched_ago": int(now - _st["ts"]) if _st["ts"] else None, "error": _st["err"]}
 
 
@@ -245,6 +277,7 @@ def test():
     with _lock:
         _st["bad"].clear()
         _st["down_until"] = 0
+        _st["fails"] = 0
     lst = pool(force=True)
     if not lst:
         return {"ok": False, "count": 0, "msg": _st["err"] or "没有提取到代理"}
@@ -255,13 +288,13 @@ def test():
         t0 = time.time()
         try:
             n = json.loads(_open_via(p, TEST_URL, hdr, 8, "utf-8"))["data"]["total"]
-            _st["good"] = p
+            _mark(p, True)
             return {"ok": True, "count": len(lst), "tried": tried, "ms": int((time.time() - t0) * 1000),
                     "msg": "提取到 %d 个代理，第 %d 个就能拿到东方财富行情（%d 只，%d 毫秒）" % (
                         len(lst), tried, n, (time.time() - t0) * 1000)}
         except Exception as e:
             last = type(e).__name__
-            _st["bad"][p] = time.time() + BAD_SECONDS
+            _mark(p, False)
     return {"ok": False, "count": len(lst), "tried": tried,
             "msg": "提取到 %d 个代理，试了 %d 个都拿不到东方财富行情（%s）。可能是代理要先把服务器 IP 加白名单，或地区不对" % (
                 len(lst), tried, last)}
