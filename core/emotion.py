@@ -26,9 +26,10 @@ POOLS = {"zt": ("getTopicZTPool", "fbt:asc"), "zb": ("getTopicZBPool", "fbt:asc"
          "dt": ("getTopicDTPool", "fund:asc"), "yzt": ("getYesterdayZTPool", "zs:desc")}
 
 # 情绪阶段 → 新开仓总仓位上限（情绪短线模式用）
-RULE_V = 2          # 阶段判断规则的版本：改了规则就 +1，已保存的旧结果会按新规则重算
-STAGE_CAPS = {"冰点": 0.0, "退潮": 0.0, "修复": 0.5, "升温": 0.8, "高潮": 0.5}   # 退潮=只卖不买（和委员会规则一致）
-STAGE_TIPS = {"冰点": "亏钱效应最强的时候，空仓等修复，不抄底",
+RULE_V = 3          # 阶段判断规则的版本：改了规则就 +1，已保存的旧结果会按新规则重算
+STAGE_CAPS = {"冰点": 0.15, "退潮": 0.0, "修复": 0.5, "升温": 0.8, "高潮": 0.5}   # 退潮=只卖不买；冰点=只小仓位做逆势走强的（用户 11-16 同意）
+FREEZE_DT = 50      # 跌停达到这么多只才算冰点（原 20，用户 11-16 同意放宽）
+STAGE_TIPS = {"冰点": "亏钱效应最强的时候，只用小仓位（≤15%）做逆势走强的少数股，不抄跌的",
               "退潮": "高位股补跌、炸板多，只卖不买",
               "修复": "情绪刚回暖，只做最强题材的龙头，小仓位",
               "升温": "赚钱效应好，主线题材积极参与",
@@ -152,7 +153,7 @@ def _compute(date, zt, zb, dt, yzt):
     # 否则是高低切换：最多算「修复」，不给「升温/高潮」
     height_drop = bool(prev.get("max_lb") and max_lb < prev["max_lb"] - 1 and n_zt < prev.get("zt", 0))
     loss = zb_rate >= 30 or n_dt >= 5 or yzt_avg is None or yzt_avg < 1
-    if n_zt < 30 or n_dt >= 20 or (yzt_avg is not None and yzt_avg < -2):
+    if n_zt < 30 or n_dt >= FREEZE_DT or (yzt_avg is not None and yzt_avg < -2):
         stage = "冰点"
     elif zb_rate >= 40 or (yzt_avg is not None and yzt_avg < 0) or (height_drop and loss):
         stage = "退潮"
@@ -195,7 +196,7 @@ def _intraday(today, hm):
                                                  "，昨日涨停今天平均%+.1f%%" % yzt_avg if yzt_avg is not None else ""))
         # 只往下调：昨天的涨停今天被砸（亏钱效应）、跌停多 → 降级；10 点前数据太少，只看跌停
         down = None
-        if n_dt >= 20 or (hm >= 1000 and yzt_avg is not None and yzt_avg < -2):
+        if n_dt >= FREEZE_DT or (hm >= 1000 and yzt_avg is not None and yzt_avg < -2):
             down = "冰点"
         elif hm >= 1000 and ((yzt_avg is not None and yzt_avg < 0) or (hm >= 1030 and n_zt + n_zb >= 20 and zb_rate >= 50)):
             down = "退潮"

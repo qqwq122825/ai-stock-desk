@@ -608,6 +608,30 @@ class TestDailyClose(Base):
             screener.run, committee.run_builtin, llm.enabled = old
         self.assertEqual(r["reviewed"], [])
 
+    def test_emotion_freeze_sends_top3_only(self):
+        """情绪冰点（上限 15%）：只送分最高的 3 只去委员会。"""
+        from core import daily, committee, llm
+        cands = [{"rank": i + 1, "symbol": "sz00%04d" % (i + 1), "name": "x%d" % i, "score": 9 - i * 0.1,
+                  "price": 10, "pct": 3, "reasons": []} for i in range(8)]
+        old = (screener.run, committee.run_builtin, llm.enabled)
+        reviewed = []
+
+        def fake_run(sym, acct, intent, trigger=""):
+            reviewed.append(sym)
+            rid = db.run("INSERT INTO committee_runs(ts,symbol,status,finished_at,final) VALUES(?,?,?,?,?)",
+                         (time.time(), sym, "rejected", time.time(), "{}"))
+            return {"run_id": rid, "status": "rejected", "decision": "pass", "summary": "测试", "gate_notes": []}
+        screener.run = lambda **k: {"screen_id": 1, "candidates": cands,
+                                    "regime": {"state": "弱势", "position_cap": 0.15,
+                                               "emotion": {"stage": "冰点", "position_cap": 0.15}}}
+        committee.run_builtin = fake_run
+        llm.enabled = lambda: True
+        try:
+            daily.run_daily_close(force=True)
+        finally:
+            screener.run, committee.run_builtin, llm.enabled = old
+        self.assertEqual(sorted(reviewed), ["sz000001", "sz000002", "sz000003"])
+
 
 class TestKlineFallback(Base):
     def test_fallback_and_breaker(self):
@@ -1175,7 +1199,14 @@ class TestMomentum(Base):
 
     def test_retreat_means_no_new_buys(self):
         self.assertEqual(emotion.STAGE_CAPS["退潮"], 0.0)              # 退潮只卖不买，和委员会规则一致
-        self.assertEqual(emotion.STAGE_CAPS["冰点"], 0.0)
+        self.assertEqual(emotion.STAGE_CAPS["冰点"], 0.15)             # 冰点：小仓位做逆势走强的（用户 11-16 同意）
+
+    def test_freeze_needs_50_limit_downs(self):
+        set_pools(n_zt=84, n_zb=20, n_dt=30, yzt_pct=4.5)          # 跌停 30 只：亏钱但不到冰点
+        self.assertNotEqual(emotion.sentiment(date="20991227")["stage"], "冰点")
+        set_pools(n_zt=84, n_zb=20, n_dt=60, yzt_pct=4.5)          # 11-16：跌停 60 只 → 冰点，上限 15%
+        e = emotion.sentiment(date="20991226")
+        self.assertEqual((e["stage"], e["position_cap"]), ("冰点", 0.15))
 
     def test_style_per_account(self):
         self.assertEqual(config.style("paper"), "momentum")
@@ -1201,7 +1232,7 @@ class TestMomentum(Base):
         PRICES["sz000001"] = fake_quote("000001", 10.4, pct=4)
         res = agent.apply_decision({"actions": [{"symbol": "000001", "action": "buy", "confidence": 0.9}]})
         self.assertEqual(res["actions"][0]["status"], "filled", res)
-        set_pools(n_zt=20)                                          # 冰点 → 情绪仓位 0
+        set_pools(n_zt=80, n_zb=80, yzt_pct=1)                      # 退潮 → 情绪仓位 0
         PRICES["sz000002"] = fake_quote("000002", 10.0, pct=4)
         res = agent.apply_decision({"actions": [{"symbol": "000002", "action": "buy", "confidence": 0.9}]})
         self.assertIn("总仓位上限", res["actions"][0]["error"])
