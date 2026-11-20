@@ -278,8 +278,11 @@ nav .badge.hidden{display:none}
 const $=s=>document.querySelector(s);
 const TOKEN=(()=>{const u=new URLSearchParams(location.search).get('token');try{if(u)localStorage.setItem('tk',u);return u||localStorage.getItem('tk')||''}catch(e){return u||''}})();
 async function api(path,opt={}){
-  const r=await fetch(path,{method:opt.method||'GET',headers:{'Content-Type':'application/json','X-Token':TOKEN},body:opt.body?JSON.stringify(opt.body):undefined});
+  const epoch=viewEpoch,scoped=(opt.method||'GET')==='GET'&&!opt.background;
+  const signal=scoped?viewAbort.signal:undefined;
+  const r=await fetch(path,{signal,method:opt.method||'GET',headers:{'Content-Type':'application/json','X-Token':TOKEN},body:opt.body?JSON.stringify(opt.body):undefined});
   const j=await r.json().catch(()=>({error:'响应解析失败'}));
+  if(scoped&&epoch!==viewEpoch)throw new DOMException('页面已切换','AbortError');
   if(r.status==401&&j.login){location.href='/login';throw new Error('需要登录')}
   if(!r.ok){toast('❌ '+(j.error||r.status));throw new Error(j.error)}
   return j;
@@ -295,6 +298,7 @@ const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&g
 const SIDE={buy:'<span class="tag buy">买入</span>',sell:'<span class="tag sell">卖出</span>',watch:'<span class="tag">关注</span>'};
 const ST={pending_confirm:'<span class="tag wait">待确认</span>',confirmed:'<span class="tag wait">已确认待成交</span>',submitted:'<span class="tag wait">已报单</span>',filled:'<span class="tag ok">已成交</span>',rejected:'<span class="tag bad">拒绝</span>',expired:'<span class="tag">过期</span>',cancelled:'<span class="tag">取消</span>'};
 let charts=[],timer=null,page='',stockSym=null,stockPeriod='day';
+let viewEpoch=0,viewAbort=new AbortController(),renderingEpoch=-1;
 // ===== 两个模式 = 两套完全独立的界面（主题、菜单、首页、每个页面的内容都不同） =====
 let ACCT=(()=>{try{return localStorage.getItem('acct')==='live'?'live':'paper'}catch(e){return 'paper'}})();
 const ACCT_NAME={paper:'模拟盘',live:'实盘'};
@@ -327,6 +331,8 @@ function setAcct(a){if(a===ACCT||$('#warp').className)return;
 }
 function toggleMode(){setAcct(ACCT=='paper'?'live':'paper')}
 function go(p){location.hash=p}
+// 页面函数写屏前确认自己还是当前页：切走以后才回来的旧请求写进一个丢弃的 div，不会把旧页面刷回来
+function $app(k){return page===k?$('#app'):document.createElement('div')}
 function mkChart(el){const c=echarts.init(el,'dark',{renderer:'canvas'});charts.push(c);return c}
 window.addEventListener('resize',()=>charts.forEach(c=>c.resize()));
 document.addEventListener('click',e=>{const t=e.target.closest('.tools');document.querySelectorAll('.tools').forEach(x=>{if(x!==t)x.classList.remove('open')})});
@@ -339,7 +345,7 @@ function paintStatus(s){
   const p=$('#pend');p.textContent='实盘待确认 '+s.pending;p.classList.toggle('hidden',!s.pending||ACCT=='live');
   const b=$('#nbadge');if(b){b.textContent=s.pending;b.classList.toggle('hidden',!s.pending)}
 }
-async function status(){try{const s=await api('/api/status');window._st=s;paintStatus(s)}catch(e){}}
+async function status(){try{const s=await api('/api/status',{background:true});window._st=s;paintStatus(s)}catch(e){}}
 
 // ---------- 两个模式共用的小部件 ----------
 const STEP_ST={run:'运行中',done:'今天已完成',wait:'等待时间到',off:'今天不运行'};
@@ -373,7 +379,7 @@ async function pageCockpit(first){
   const [ov,ap,tl,pl]=await Promise.all([api('/api/overview'),api('/api/autopilot?account=paper'),api('/api/timeline?account=paper&days=3'),api('/api/plans').catch(()=>({active:[]}))]);
   const s=ov.accounts.paper,on=ap.ai_accounts.includes('paper'),t=ap.today;
   if(first||!$('#ck')){
-    $('#app').innerHTML=`<div id="tick">${ticker(ov,null)}</div>
+    $app('cockpit').innerHTML=`<div id="tick">${ticker(ov,null)}</div>
      <section class="hero" id="ck"><div class="orb" id="orb"><div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div><div class="core"><b id="orbT">--</b><small id="orbS"></small></div></div>
        <div class="hnums" id="hnums"></div><div class="hside" id="hside"></div></section>
      <section class="card" id="pipe"></section>
@@ -400,11 +406,12 @@ async function pageCockpit(first){
 
 // 模拟盘：持仓战绩
 async function pageBook(){
+  const epoch=viewEpoch;
   const [ov,pl,ts]=await Promise.all([api('/api/overview'),api('/api/plans').catch(()=>({active:[],closed:[]})),api('/api/trades?account=paper')]);
   const s=ov.accounts.paper,closed=(pl.closed||[]).filter(c=>c.account=='paper');
   const rp=c=>(c.outcome||{}).realized_pnl||0,wins=closed.filter(c=>rp(c)>0).length,tot=closed.reduce((a,c)=>a+rp(c),0);
   const avgDays=closed.length?closed.reduce((a,c)=>a+((c.outcome||{}).held_days||0),0)/closed.length:0;
-  $('#app').innerHTML=`<div class="bstat" style="margin-bottom:14px">
+  $app('book').innerHTML=`<div class="bstat" style="margin-bottom:14px">
      <div><small>已完成的波段</small><b>${closed.length}</b></div><div><small>胜率</small><b class="${closed.length?(wins/closed.length>=.5?'up':'down'):''}">${closed.length?Math.round(wins/closed.length*100)+'%':'--'}</b></div>
      <div><small>已实现盈亏</small><b class="${pc(tot)}">${sg(tot)}</b></div><div><small>平均持有</small><b>${closed.length?f2(avgDays,1)+'天':'--'}</b></div></div>
    <div class="card"><h3>🎯 当前持仓（${s.positions.length}）</h3>${posCards(s,pl.active.filter(p=>p.account=='paper'),'paper')}</div>
@@ -413,7 +420,7 @@ async function pageBook(){
     <div class="card"><h3>🧾 成交流水</h3>${tradeTable(ts)}</div></div>
    <div class="grid g2" style="margin-top:14px"><div class="card"><h3>🩺 能不能上实盘 <span class="mute r">模拟盘体检</span></h3><div id="rvCheck" class="mute">计算中…</div></div>
     <div class="card"><h3>🔍 委员会事后对账 <span class="mute r">近 30 天，被否的票后来怎么样了</span></h3><div id="rvOut" class="mute">计算中…</div></div></div>`;
-  api('/api/review?account=paper').then(r=>{if(page!='book')return;const k=r.check,o=r.outcomes,st=o.stats;
+  api('/api/review?account=paper').then(r=>{if(page!='book'||epoch!==viewEpoch)return;const k=r.check,o=r.outcomes,st=o.stats;
     $('#rvCheck').innerHTML=`<div style="margin-bottom:8px"><b class="${k.ready?'up':''}">${esc(k.advice)}</b></div>${k.checks.map(c=>`<div class="row"><span>${c.ok?'✅':'⬜'} ${esc(c.name)}</span><span class="r num">${esc(c.value)}</span></div>`).join('')}
       ${k.closed?`<div class="mute" style="margin-top:6px">胜率 ${k.win_rate}% · 平均每笔 ${sg(k.avg_pnl)}</div>`:''}`;
     const P=x=>x==null?'--':`<span class="${pc(x)}">${sg(x)}%</span>`;
@@ -422,7 +429,7 @@ async function pageBook(){
       ${row('approved','✅ 通过')}${row('wait','⏳ 等回踩')}${row('rejected','❌ 没通过')}${row('unreviewed','· 前10没送审')}</table>
       ${o.missed.length?`<div class="mute" style="margin-top:6px">错过的：${o.missed.map(r=>esc(r.name)+'('+r.date+' 最高'+sg(r.max_up5)+'%)').join('、')}</div>`:''}
       ${o.dodged.length?`<div class="mute">躲过的：${o.dodged.map(r=>esc(r.name)+'('+r.date+')').join('、')}</div>`:''}
-      <div class="mute" style="margin-top:6px"><small>每周五收盘后会把这份对账推送到微信。</small></div>`}).catch(e=>{$('#rvOut').textContent='计算失败：'+e.message});
+      <div class="mute" style="margin-top:6px"><small>每周五收盘后会把这份对账推送到微信。</small></div>`}).catch(e=>{const el=$('#rvOut');if(el&&epoch===viewEpoch&&e.name!=='AbortError')el.textContent='计算失败：'+e.message});
 }
 
 // ================= ◆ 实盘：交易台 =================
@@ -437,7 +444,7 @@ async function pageDesk(first){
   const [ov,ap,os,tl,pl]=await Promise.all([api('/api/overview'),api('/api/autopilot?account=live'),api('/api/orders'),api('/api/timeline?account=live&days=7'),api('/api/plans').catch(()=>({active:[]}))]);
   const s=ov.accounts.live,on=ap.ai_accounts.includes('live'),pend=os.filter(o=>o.account=='live'&&PEND_ST.includes(o.status));
   if(first||!$('#dk')){
-    $('#app').innerHTML=`<div id="tick">${ticker(ov,null)}</div>
+    $app('desk').innerHTML=`<div id="tick">${ticker(ov,null)}</div>
      <div class="dhero" id="dk"><div class="queue" id="queue"></div><div class="card" id="dacct"></div></div>
      <div class="card" id="dflow"></div>
      <div class="grid g21" style="margin-top:14px"><div class="card"><h3>◆ 实盘持仓 <a class="r" href="#ledger">对账 →</a></h3><div id="dpos"></div></div>
@@ -471,7 +478,7 @@ async function pageDesk(first){
 async function pageLedger(){
   const [ov,pl,ts]=await Promise.all([api('/api/overview'),api('/api/plans').catch(()=>({active:[]})),api('/api/trades?account=live')]);
   const s=ov.accounts.live;
-  $('#app').innerHTML=`<div class="hint">实盘的钱和股票在<b>你的券商</b>那里，系统只是记账。每次在券商 App 成交后回填价格，或者在下面直接改成和券商一致。</div>
+  $app('ledger').innerHTML=`<div class="hint">实盘的钱和股票在<b>你的券商</b>那里，系统只是记账。每次在券商 App 成交后回填价格，或者在下面直接改成和券商一致。</div>
    <div class="grid g21"><div class="card"><h3>◆ 实盘持仓（${s.positions.length}）</h3>${posCards(s,pl.active.filter(p=>p.account=='live'),'live')}</div>
     <div class="card"><h3>校准成和券商一致</h3><div class="form">
      <label>总资产</label><b class="num">${money(s.equity)}</b>
@@ -488,7 +495,7 @@ async function pageFeed(){
   const list=ev.filter(e=>FEED_F=='all'||e.kind==FEED_F);
   let day='',html='';
   for(const e of list){const d=e.time.slice(0,5);if(d!=day){day=d;html+=`<div class="tlday">${d}</div>`}html+=feedRow(e)}
-  $('#app').innerHTML=`<div class="hint">${ACCT=='paper'?'<b>AI 的工作日志</b>：几点选了哪些股、委员会为什么通过/否决、AI 为什么买卖、哪笔是止损自动卖的，全在这里。点标题看详情。'
+  $app('feed').innerHTML=`<div class="hint">${ACCT=='paper'?'<b>AI 的工作日志</b>：几点选了哪些股、委员会为什么通过/否决、AI 为什么买卖、哪笔是止损自动卖的，全在这里。点标题看详情。'
       :'<b>AI 给实盘的建议</b>：AI 想对你真实账户做的每一个操作，都会变成「建议单」等你确认。选股和委员会结论与模拟盘相同。'}</div>
    <div class="card"><h3>${ACCT=='paper'?'📡 AI 动态 · 最近 7 天':'🧠 AI 建议记录 · 最近 7 天'}
      <span class="r seg">${kinds.map(([k,t])=>`<button class="${k==FEED_F?'act':''}" onclick="FEED_F='${k}';pageFeed()">${t}</button>`).join('')}</span></h3>
@@ -512,7 +519,7 @@ async function quickSell(sym,n){if(!confirm(`模拟盘卖出 ${sym} ${n} 股？`
 // ---------- 行情 ----------
 async function pageWatch(first){
   const w=await api('/api/watchlist');
-  if(first){$('#app').innerHTML=`<div class="grid g21"><div class="card"><h3>自选股 · 五档盘口实时（约3秒）
+  if(first){$app('watch').innerHTML=`<div class="grid g21"><div class="card"><h3>自选股 · 五档盘口实时（约3秒）
     <span class="r row"><input id="addsym" placeholder="代码 如 600519" style="width:130px"><input id="addnote" placeholder="备注" style="width:100px"><button class="pri" onclick="addWatch()">加自选</button></span></h3>
     <div class="scroll" id="wt"></div></div><div class="card" id="detail"><div class="empty">点击左侧股票查看K线、MACD/KDJ、盘口和下单</div></div></div>`;}
   $('#wt').innerHTML=`<table><tr><th>股票</th><th class="n">现价</th><th class="n">涨跌幅</th><th class="n">买一</th><th class="n">卖一</th><th class="n">委比</th><th class="n">量比</th><th class="n">成交额</th><th class="n">换手</th><th></th></tr>
@@ -613,12 +620,13 @@ function emotionCard(g){if(!g||g.error)return `<div class="card"><h3>情绪周�
    <div><small>昨日涨停今天</small><span class="num ${pc(g.yzt_avg_pct||0)}">${g.yzt_avg_pct==null?'--':sg(g.yzt_avg_pct)+'%'}</span></div></div>
   <div style="margin-top:10px">${(g.themes||[]).map(t=>`<span class="tag" style="margin:2px">🔥${esc(t.name)} ${t.zt}家${t.max_lb>1?' · '+t.max_lb+'连板':''} <small class="mute">${t.leaders.map(x=>esc(x.name)).join('、')}</small></span>`).join('')}</div></div>`}
 async function pageScreen(first){
+  const epoch=viewEpoch;
   const [s,runs,ov]=await Promise.all([api('/api/screen?account='+ACCT),api('/api/committee?account='+ACCT).catch(()=>[]),api('/api/overview').catch(()=>null)]);
   const L=s.latest,held=new Set(ov?ov.accounts[ACCT].positions.map(p=>p.symbol):[]),last={};
   runs.forEach(r=>{if(!last[r.symbol])last[r.symbol]=r});
   const prog=c=>held.has(c.symbol)?'<span class="tag ok">已持有</span>':last[c.symbol]?RUN_ST(last[c.symbol]):'<span class="tag">未审核</span>';
   const MOM=(L&&L.stats&&L.stats.style)=='momentum';
-  $('#app').innerHTML=`<div class="hint">${ACCT=='paper'?'<b>AI 今日选股 · 模拟盘专用</b>：每个交易日 15:05 自动选股，前 10 名（分够的）自动送委员会，通过的由 AI 择机买入模拟盘。想加快某只的审核可以点「加急审核」。'
+  $app('screen').innerHTML=`<div class="hint">${ACCT=='paper'?'<b>AI 今日选股 · 模拟盘专用</b>：每个交易日 15:05 自动选股，前 10 名（分够的）自动送委员会，通过的由 AI 择机买入模拟盘。想加快某只的审核可以点「加急审核」。'
      :'<b>实盘选股 · 实盘专用</b>：和模拟盘完全分开，按你实盘的资金算「一手买不买得起」。实盘不会自动买，委员会通过后 AI 生成建议单等你确认。'}</div>
   <div class="grid g2" style="margin-bottom:14px"><div id="reg"><div class="card"><h3>大盘状态（择时）</h3><div class="mute">加载中…</div></div></div>
   <div class="card"><h3>${ACCT=='paper'?'选股漏斗 · 模拟盘':'选股漏斗 · 实盘'}（${MOM?'情绪短线 1~3 天':'波段 1~4 周'}）</h3><div class="mute"><small>${MOM
@@ -632,8 +640,8 @@ async function pageScreen(first){
    <td>${prog(c)}</td><td><button class="sm" onclick="toCommittee('${c.symbol}',this)">${ACCT=='paper'?'加急审核':'送委员会'}</button> <button class="sm" onclick="quickWatch('${c.symbol}')">+自选</button></td></tr>`).join('')
    :`<tr><td colspan=9 class="empty">${ACCT=='paper'?'还没有选股结果，点"立即选股"':'实盘还没选过股。先在「持仓对账」录入资金，再点"立即选股"'}</td></tr>`}</table></div></div>`;
   // 大盘状态单独加载，接口慢也不挡住页面
-  api('/api/regime').catch(e=>({error:e.message})).then(g=>{const e=$('#reg');if(e&&page=='screen')e.innerHTML=regimeCard(g)});
-  api('/api/emotion').catch(e=>({error:e.message})).then(g=>{const e=$('#emo');if(e&&page=='screen')e.innerHTML=emotionCard(g)});
+  api('/api/regime').catch(e=>({error:e.message})).then(g=>{const e=$('#reg');if(e&&page=='screen'&&epoch===viewEpoch)e.innerHTML=regimeCard(g)});
+  api('/api/emotion').catch(e=>({error:e.message})).then(g=>{const e=$('#emo');if(e&&page=='screen'&&epoch===viewEpoch)e.innerHTML=emotionCard(g)});
   if(s.running)pollScreen();
 }
 function screenBox(s,L){
@@ -682,7 +690,7 @@ const RUN_ST=r=>r.watch&&WATCH_ST[r.watch.status]?WATCH_ST[r.watch.status](r.wat
 async function pageCommittee(first){
   const rs=await api('/api/committee?account='+ACCT);
   if(first||!$('#clist')){
-    $('#app').innerHTML=`<div class="grid g21"><div class="card" id="cdetail"><div class="empty">选择右侧一次会议查看 11 位成员的意见<br><small>5 分析师 → 多空辩论 → 研究主管 → 交易员 → 风控官 → 组合经理</small></div></div>
+    $app('committee').innerHTML=`<div class="grid g21"><div class="card" id="cdetail"><div class="empty">选择右侧一次会议查看 11 位成员的意见<br><small>5 分析师 → 多空辩论 → 研究主管 → 交易员 → 风控官 → 组合经理</small></div></div>
     <div class="card"><h3>委员会会议</h3><div class="list" id="clist"></div></div></div>`;
     LIST_SIG='';RUN_SIG='';
   }
@@ -729,7 +737,7 @@ async function showRun(id){const r=await api('/api/committee/'+id);const f=r.fin
 let RT=null;
 async function pageRules(first){
   const [r,al]=await Promise.all([api('/api/rules'),api('/api/alerts?limit=80')]);RT=r;
-  $('#app').innerHTML=`<div class="grid g21"><div class="card"><h3>预设规则（抵达条件 → 推送微信）</h3><div class="scroll"><table>
+  $app('rules').innerHTML=`<div class="grid g21"><div class="card"><h3>预设规则（抵达条件 → 推送微信）</h3><div class="scroll"><table>
   <tr><th>#</th><th>对象</th><th>条件</th><th>参数</th><th>动作</th><th class="n">冷却</th><th>备注</th><th>来源</th><th>上次触发</th><th></th></tr>
   ${r.rules.map(x=>`<tr style="${x.enabled?'':'opacity:.45'}"><td>${x.id}</td><td>${{'*WATCH':'全部自选','*POS':'全部持仓','*ALL':'自选+持仓'}[x.symbol]||x.symbol}</td><td>${esc(x.label)}</td>
    <td class="num">${esc(Object.entries(x.params).map(([k,v])=>k+'='+v).join(' '))}</td><td>${r.actions[x.action]}</td><td class="n">${x.cooldown_min}分</td>
@@ -756,7 +764,7 @@ async function delRule(id){if(!confirm('删除规则 #'+id+'？'))return;await a
 // ---------- 策略 ----------
 async function pageStrategies(){
   const s=await api('/api/strategies');
-  $('#app').innerHTML=`<div class="card" style="margin-bottom:14px"><h3>指标策略（盘中每个行情快照都会计算）</h3>
+  $app('strategies').innerHTML=`<div class="card" style="margin-bottom:14px"><h3>指标策略（盘中每个行情快照都会计算）</h3>
   <div class="mute">日线类策略用"今日实时价"更新最后一根K线计算，盘中信号收盘前可能变化；秒级类策略基于约3秒一次的五档盘口快照。
   自己写策略：复制 <code>strategies/my_strategy_example.py</code>，实现 <code>on_bar</code> / <code>on_tick</code>，重启后自动出现在这里。</div></div>
   <div class="grid g3">${s.map(x=>`<div class="card"><h3>${esc(x.label)} <span class="tag">${x.kind=='tick'?'秒级盘口':'日线指标'}</span>
@@ -773,7 +781,7 @@ let BT=null;
 async function pageBacktest(){
   const s=(await api('/api/strategies')).filter(x=>x.backtestable);
   const cur=BT||{strategy:'resonance'};
-  $('#app').innerHTML=`<div class="card" style="margin-bottom:14px"><h3>策略回测（日K，信号次日开盘成交，含费用/一手/涨跌停）</h3>
+  $app('backtest').innerHTML=`<div class="card" style="margin-bottom:14px"><h3>策略回测（日K，信号次日开盘成交，含费用/一手/涨跌停）</h3>
   <div class="row"><select id="bts">${s.map(x=>`<option value="${x.name}" ${x.name==cur.strategy?'selected':''}>${esc(x.label)}</option>`).join('')}<option value="__all">全部日线策略对比</option></select>
   <input id="btsym" placeholder="代码，逗号分隔；留空=全部自选" style="width:260px"><label>回测天数</label><input id="btd" type="number" value="500" style="width:80px">
   <button class="pri" onclick="runBT()">开始回测</button><span class="mute" id="btmsg"></span></div>
@@ -818,7 +826,7 @@ function decCard(d){const res=d.results||{};const acts=(res.actions||[]);
   ${d.payload.next_focus?`<div><small class="acc">下次关注：${esc(d.payload.next_focus)}</small></div>`:''}</div>`}
 async function pageAI(){
   const [ds,st]=await Promise.all([api('/api/decisions?limit=40'),api('/api/status')]);
-  $('#app').innerHTML=`<div class="grid g21"><div class="card"><h3>AI 决策记录</h3>${ds.map(decCard).join('')||'<div class="empty">还没有决策。外部定时 AI 每10分钟运行 agent_cli.py；或在右侧调用内置模型。</div>'}</div>
+  $app('ai').innerHTML=`<div class="grid g21"><div class="card"><h3>AI 决策记录</h3>${ds.map(decCard).join('')||'<div class="empty">还没有决策。外部定时 AI 每10分钟运行 agent_cli.py；或在右侧调用内置模型。</div>'}</div>
   <div><div class="card"><h3>AI 介入方式</h3><div class="list">
     <div>⏱ <b>定时介入</b>：外部 AI 定时任务每10分钟读取 <code>agent_cli.py context</code> → 决策 → <code>agent_cli.py decide</code></div>
     <div>⚡ <b>异动·内置模型</b>：规则/强信号触发时程序调用大模型 API 调研决策 ${st.llm_enabled?'<span class="tag ok">已启用</span>':'<span class="tag">未启用（设置里填 API Key）</span>'}</div>
@@ -831,7 +839,7 @@ async function pageAI(){
   <div class="card" style="margin-top:14px"><h3>手动提交决策 JSON（调试）</h3><textarea id="dj" rows="10">{"market_view":"测试","actions":[{"symbol":"510300","action":"buy","position_pct":0.2,"confidence":0.7,"reason":"测试"}]}</textarea>
   <button style="margin-top:8px" onclick="subDec()">提交</button></div>
   <div class="card hidden" id="ctxc" style="margin-top:14px"><h3>上下文 JSON</h3><pre id="ctx"></pre></div></div></div>`;
-  api('/api/journal').then(j=>{const e=$('#jtext');if(e)e.textContent=j.text||'（暂无日志。AI 收盘复盘时会写入，你也可以在下面写给 AI 的话）'});
+  api('/api/journal').then(j=>{const e=$('#jtext');if(e)e.textContent=j.text||'（暂无日志。AI 收盘复盘时会写入，你也可以在下面写给 AI 的话）'}).catch(e=>{if(e.name!=='AbortError')console.error(e)});
 }
 async function addJournal(){const t=$('#jin').value.trim();if(!t)return;await post('/api/journal',{text:t,author:'我'});$('#jin').value='';pageAI()}
 async function testWake(){const r=await post('/api/wakeup/test');toast(r.ok?'已启动外部 AI，输出见 data/wakeup.log':'未启动（上一个还在运行？）')}
@@ -842,7 +850,7 @@ async function subDec(){const r=await post('/api/agent/decide',JSON.parse($('#dj
 // ---------- 订单 ----------
 async function pageOrders(){
   const os=(await api('/api/orders')).filter(o=>o.account=='live');const pend=os.filter(o=>PEND_ST.includes(o.status));
-  $('#app').innerHTML=`<div class="hint"><b>流程</b>：AI 建议 → 你点「确认」→ 打开券商 App 自己下单 → 回来填实际成交价。不想买就点「拒绝」，建议单过期会自动作废。</div>
+  $app('orders').innerHTML=`<div class="hint"><b>流程</b>：AI 建议 → 你点「确认」→ 打开券商 App 自己下单 → 回来填实际成交价。不想买就点「拒绝」，建议单过期会自动作废。</div>
    <div class="card"><h3>◆ 等你处理（${pend.length}）</h3>${pend.map(orderCard).join('')||'<div class="empty">没有待处理订单 · AI 有新建议时会推送微信</div>'}</div>
    <div class="card" style="margin-top:14px"><h3>全部实盘订单</h3><div class="scroll"><table><tr><th>#</th><th>时间</th><th>股票</th><th>方向</th><th class="n">数量</th><th class="n">参考价</th><th>状态</th><th>说明</th></tr>
    ${os.map(o=>`<tr><td>${o.id}</td><td class="mute">${o.created_at_str}</td><td>${esc(o.name)}</td><td>${SIDE[o.side]}</td><td class="n">${o.shares}</td><td class="n">${f2(o.ref_price,3)}</td><td>${ST[o.status]||o.status}</td><td class="mute"><small>${esc(o.message||o.reason)}</small></td></tr>`).join('')||'<tr><td colspan=8 class="empty">暂无</td></tr>'}</table></div></div>`;
@@ -855,7 +863,7 @@ async function pageSettings(){
   const c=await api('/api/config');
   const inp=(sec,k,type='text',ph='')=>`<input type="${type}" data-sec="${sec}" data-k="${k}" value="${esc(c[sec][k])}" placeholder="${ph}">`;
   const chk=(sec,k)=>`<input type="checkbox" data-sec="${sec}" data-k="${k}" ${c[sec][k]?'checked':''}>`;
-  $('#app').innerHTML=`<div class="grid g2">
+  $app('settings').innerHTML=`<div class="grid g2">
   ${(()=>{const A=(c.notify.accounts||{})[ACCT]||{},K=A.kinds||{},nm=ACCT=='live'?'实盘':'模拟盘';
    return `<div class="card" style="grid-column:1/-1"><h3>微信 ClawBot · 推送</h3>
    <div class="grid g2" style="gap:18px;align-items:start">
@@ -1003,18 +1011,27 @@ const PAGES={cockpit:[pageCockpit,10000],book:[pageBook,15000],desk:[pageDesk,80
   watch:[pageWatch,3000],screen:[pageScreen,0],committee:[pageCommittee,3000],rules:[pageRules,0],strategies:[pageStrategies,0],
   backtest:[pageBacktest,0],ai:[pageAI,30000],orders:[pageOrders,8000],settings:[pageSettings,0]};
 const KEEP=['watch','cockpit','desk'];   // 这些页面局部刷新，不销毁图表
-async function render(first){const [fn]=PAGES[page];if(!first&&!KEEP.includes(page)){charts.forEach(c=>c.dispose());charts=[]}try{await fn(first)}catch(e){console.error(e)}}
+async function render(first){
+  const epoch=viewEpoch,[fn]=PAGES[page];
+  if(!first&&renderingEpoch===epoch)return; // 上一轮没完成时，不叠加自动刷新
+  renderingEpoch=epoch;
+  if(!first&&!KEEP.includes(page)){charts.forEach(c=>c.dispose());charts=[]}
+  try{await fn(first)}catch(e){if(e.name!=='AbortError')console.error(e)}
+  finally{if(renderingEpoch===epoch)renderingEpoch=-1}
+}
 function route(){
   let p=location.hash.slice(1);const home=MODES[ACCT].home;
   if(!PAGES[p]||p=='dash'){if(location.hash.slice(1)!==home){location.replace('#'+home);return}p=home}
   // 属于另一个模式的页面 → 回到当前模式首页（每个页面只为一个模式服务）
   const other=ACCT=='paper'?'live':'paper';
   if(MODE_PAGES[other].includes(p)&&!MODE_PAGES[ACCT].includes(p)){location.replace('#'+home);return}
+  const epoch=++viewEpoch;viewAbort.abort();viewAbort=new AbortController();
   page=p;applyMode();document.querySelectorAll('.tools').forEach(x=>x.classList.remove('open'));
-  const a=$('#app');a.classList.remove('enter');void a.offsetWidth;a.classList.add('enter');
   charts.forEach(c=>c.dispose());charts=[];clearInterval(timer);
-  render(true).then(()=>{if(page=='watch'&&stockSym)openStock(stockSym)});
-  const iv=PAGES[page][1];if(iv)timer=setInterval(()=>{if(!document.hidden&&!document.activeElement.matches('input,textarea,select'))render(false)},iv)}
+  const a=$('#app');a.innerHTML='<div class="card"><div class="empty">加载中…</div></div>';   // 先清掉旧页面，不让它在等数据时还挂着
+  a.classList.remove('enter');void a.offsetWidth;a.classList.add('enter');
+  render(true).then(()=>{if(epoch===viewEpoch&&page=='watch'&&stockSym)openStock(stockSym)});
+  const iv=PAGES[page][1];if(iv)timer=setInterval(()=>{if(epoch===viewEpoch&&!document.hidden&&!document.activeElement.matches('input,textarea,select'))render(false)},iv)}
 window.addEventListener('hashchange',route);route();status();setInterval(status,5000);
 </script>
 </body>
