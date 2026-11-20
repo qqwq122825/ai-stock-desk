@@ -26,9 +26,10 @@ POOLS = {"zt": ("getTopicZTPool", "fbt:asc"), "zb": ("getTopicZBPool", "fbt:asc"
          "dt": ("getTopicDTPool", "fund:asc"), "yzt": ("getYesterdayZTPool", "zs:desc")}
 
 # 情绪阶段 → 新开仓总仓位上限（情绪短线模式用）
-RULE_V = 3          # 阶段判断规则的版本：改了规则就 +1，已保存的旧结果会按新规则重算
+RULE_V = 4          # 阶段判断规则的版本：改了规则就 +1，已保存的旧结果会按新规则重算
 STAGE_CAPS = {"冰点": 0.15, "退潮": 0.0, "修复": 0.5, "升温": 0.8, "高潮": 0.5}   # 退潮=只卖不买；冰点=只小仓位做逆势走强的（用户 11-16 同意）
 FREEZE_DT = 50      # 跌停达到这么多只才算冰点（原 20，用户 11-16 同意放宽）
+LOSS_DT = 20        # 跌停 20~49 只：不算冰点，但仓位上限也不能比冰点宽（防止跌停 40 只反而给「修复」50%）
 STAGE_TIPS = {"冰点": "亏钱效应最强的时候，只用小仓位（≤15%）做逆势走强的少数股，不抄跌的",
               "退潮": "高位股补跌、炸板多，只卖不买",
               "修复": "情绪刚回暖，只做最强题材的龙头，小仓位",
@@ -168,7 +169,11 @@ def _compute(date, zt, zb, dt, yzt):
         stage = "修复"
     if prev.get("zt"):
         why.append("涨停数较上个交易日 %+d" % (n_zt - prev["zt"]))
-    return {"date": date, "rule": RULE_V, "stage": stage, "position_cap": STAGE_CAPS[stage], "tip": STAGE_TIPS[stage],
+    cap = STAGE_CAPS[stage]
+    if n_dt >= LOSS_DT and cap > STAGE_CAPS["冰点"]:
+        cap = STAGE_CAPS["冰点"]
+        why.append("跌停%d只（≥%d），亏钱效应明显，仓位上限压到和冰点一样 %d%%" % (n_dt, LOSS_DT, cap * 100))
+    return {"date": date, "rule": RULE_V, "stage": stage, "position_cap": cap, "tip": STAGE_TIPS[stage],
             "zt": n_zt, "dt": n_dt, "zb": n_zb, "zb_rate": round(zb_rate, 1), "max_lb": max_lb,
             "yzt_avg_pct": round(yzt_avg, 2) if yzt_avg is not None else None, "reasons": why,
             "themes": hot_themes(zt)[:8]}
@@ -203,11 +208,17 @@ def _intraday(today, hm):
         if down and STAGE_CAPS[down] < STAGE_CAPS[stage]:
             why.append("盘中亏钱效应明显，下调为「%s」" % down)
             stage = down
+    cap = STAGE_CAPS[stage]
+    if stage == base["stage"]:
+        cap = min(cap, base.get("position_cap", cap))      # 昨天收盘已经因跌停多压过上限的，盘中沿用
+    if live and live["dt"] >= LOSS_DT and cap > STAGE_CAPS["冰点"]:
+        cap = STAGE_CAPS["冰点"]
+        why.append("盘中跌停%d只，仓位上限压到 %d%%" % (live["dt"], cap * 100))
     themes = base.get("themes") or []
     if zt is not None and hm >= 1030:
         themes = hot_themes(zt)[:8] or themes      # 10:30 以后当天的题材才有参考价值
     return dict(live or {k: base.get(k) for k in ("zt", "dt", "zb", "zb_rate", "max_lb", "yzt_avg_pct")},
-                date=today, stage=stage, position_cap=STAGE_CAPS[stage], tip=STAGE_TIPS[stage], reasons=why,
+                date=today, stage=stage, position_cap=cap, tip=STAGE_TIPS[stage], reasons=why,
                 themes=themes, final=False, intraday=True, prev_stage=base["stage"], prev_date=prev_date,
                 basis="盘中：以 %s 收盘情绪为准，当天数据只往下调" % prev_date)
 

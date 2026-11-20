@@ -1203,7 +1203,11 @@ class TestMomentum(Base):
 
     def test_freeze_needs_50_limit_downs(self):
         set_pools(n_zt=84, n_zb=20, n_dt=30, yzt_pct=4.5)          # 跌停 30 只：亏钱但不到冰点
-        self.assertNotEqual(emotion.sentiment(date="20991227")["stage"], "冰点")
+        e = emotion.sentiment(date="20991227")
+        self.assertNotEqual(e["stage"], "冰点")
+        self.assertEqual(e["position_cap"], 0.15)                    # 但上限不能比冰点宽（11-18 跌停 40 只曾给出 50%）
+        set_pools(n_zt=84, n_zb=20, n_dt=10, yzt_pct=4.5)
+        self.assertEqual(emotion.sentiment(date="20991225")["position_cap"], 0.8)   # 跌停少：升温照常 80%
         set_pools(n_zt=84, n_zb=20, n_dt=60, yzt_pct=4.5)          # 11-16：跌停 60 只 → 冰点，上限 15%
         e = emotion.sentiment(date="20991226")
         self.assertEqual((e["stage"], e["position_cap"]), ("冰点", 0.15))

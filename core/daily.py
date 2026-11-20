@@ -89,10 +89,10 @@ def _close_one(account, progress=None):
     if regime.get("position_cap", 1) <= 0:
         say("%s，不开新仓，跳过委员会" % cold)
         n = 0
-    elif emo.get("stage") == "冰点":
-        # 冰点日只送分最高的几只（选出来的本来就是大跌里逆势走强的），仓位由情绪上限卡在 15%
+    elif emo.get("stage") == "冰点" or 0 < (emo.get("position_cap") or 1) <= 0.15:
+        # 冰点日（或跌停多、上限被压到 15% 的日子）只送分最高的几只（选出来的本来就是大跌里逆势走强的）
         n = min(n, int(cfg["screener"].get("freeze_committee_top", 3)))
-        say("情绪冰点：只送前 %d 名逆势走强的去委员会，小仓位" % n)
+        say("%s：只送前 %d 名逆势走强的去委员会，小仓位" % ("情绪冰点" if emo.get("stage") == "冰点" else "跌停多", n))
     if not llm.enabled():
         say("内置大模型未启用，只选股不开委员会")
         n = 0
